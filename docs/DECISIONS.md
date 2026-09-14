@@ -81,3 +81,12 @@
   - 후보: Google Cloud `e2-micro`(미국 3개 지역, 디스크 30GB), Oracle Cloud Always Free ARM VM(2 OCPU·12GB, 홈 리전만).
   - 미확인: Google Cloud 외부 IPv4 요금, Oracle 유휴 인스턴스 회수 정책.
 - 포기한 대안: Render 무료 플랜. 15분 무요청 시 슬립하고, 백그라운드 워커·cron을 쓸 수 없으며, 무료 Postgres가 30일 뒤 만료됩니다.
+
+## D-008 — check.sh가 개발 환경을 자동 준비
+
+- 날짜: 2026-09-14
+- 상태: 확정
+- 내용: `./scripts/check.sh`는 검증 전에 `.venv`를 Python 3.11로 준비합니다. `.venv`가 없거나 버전이 다르면 다시 만들고, pytest·ruff가 없거나 `pyproject.toml`이 바뀌었으면 `pip install -e '.[dev]'`를 다시 실행합니다. Python 3.11 자체는 설치하지 않고 안내만 합니다.
+- 이유: 3.11이 아닌 Python으로 만든 `.venv`나 의존성 미설치 때문에 팀원 환경에서 2단계 테스트가 `No module named pytest`로 실패했기 때문입니다.
+- 포기한 대안: 실패 시 안내 메시지만 출력. 원인을 사람이 해석하고 명령을 직접 실행해야 해서 채택하지 않았습니다.
+- 결과: 에이전트는 모듈 누락 오류를 `.venv` 직접 수정이 아니라 `./scripts/check.sh` 재실행으로 해결합니다.
