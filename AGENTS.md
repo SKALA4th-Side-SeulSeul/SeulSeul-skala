@@ -60,4 +60,4 @@ tests/test_<domain>.py  # 도메인별 테스트
 
 ## 완료 기준
 
-`./scripts/check.sh`가 통과해야 완료입니다. 가상환경 활성화 없이 프로젝트 `.venv`를 사용하며, `.venv`가 없으면 `README.md`의 "개발 시작" 명령을 먼저 실행합니다.
+`./scripts/check.sh`가 통과해야 완료입니다. 이 스크립트는 프로젝트 `.venv`를 Python 3.11로 준비하고 개발 의존성을 자동으로 맞춥니다. `No module named ...` 오류가 나도 `.venv`를 직접 고치지 말고 이 스크립트를 다시 실행합니다.
