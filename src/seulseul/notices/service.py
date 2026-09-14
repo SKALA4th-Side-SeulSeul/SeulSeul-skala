@@ -1,39 +1,52 @@
-"""공지 수집 규칙.
-
-Slack 채널 메시지 이벤트 중 새 공지로 볼 메시지만 골라 최신순으로 보관한다.
-AI 요약기가 주어지면 저장하기 전에 요약을 붙이고, 요약에 실패해도 원문은 저장한다.
-연결 테스트용 임시 구현이라 메모리에만 저장하며, 봇을 다시 실행하면 비워진다.
-SLACK_NOTICE_CHANNELS로 채널을 거르는 기능은 아직 없어, 봇이 초대된 채널의 메시지를 모두 받는다.
-"""
+"""설정 채널의 Slack 메시지에서 링크별 공지를 수집한다."""
 
 import logging
+import re
 import threading
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from datetime import datetime, timezone
 from typing import Any, Protocol
+from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from seulseul.ai.client import AiClientError
+from seulseul.ai.model import NoticeAnalysis
 from seulseul.notices.model import Notice
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_STORED_NOTICES = 50
-# 공개 채널(channel)과 비공개 채널(group) 메시지만 공지로 본다. DM(im) 등은 제외한다.
 NOTICE_CHANNEL_TYPES = frozenset({"channel", "group"})
+PROCESSABLE_BOT_SUBTYPE = "bot_message"
+NOTICE_URL_KEYWORDS = ("form", "docs")
+URL_PATTERN = re.compile(r"https?://[^\s<>|]+", re.IGNORECASE)
+URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
+SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 
-class NoticeSummarizerProtocol(Protocol):
-    def summarize(self, notice_text: str) -> str: ...
+class NoticeAnalyzerProtocol(Protocol):
+    def analyze(self, notice_text: str, notice_url: str, posted_at: datetime) -> NoticeAnalysis: ...
 
 
-def is_new_notice_message(event: Mapping[str, Any]) -> bool:
-    """메시지 이벤트가 새 공지로 볼 수 있는 일반 채널 메시지인지 판단한다."""
-    # subtype이 있으면 수정·삭제·입장 알림·봇 메시지 등이라 새 공지가 아니다.
-    if event.get("subtype") is not None or event.get("bot_id"):
+def is_new_notice_message(
+    event: Mapping[str, Any],
+    allowed_channel_ids: Collection[str],
+    bot_user_id: str | None,
+    bot_id: str | None = None,
+) -> bool:
+    """설정 채널에서 받은 새 최상위 메시지인지 판단한다."""
+    subtype = event.get("subtype")
+    if subtype not in (None, PROCESSABLE_BOT_SUBTYPE):
+        return False
+    if (bot_user_id and event.get("user") == bot_user_id) or (
+        bot_id and event.get("bot_id") == bot_id
+    ):
         return False
     if event.get("channel_type") not in NOTICE_CHANNEL_TYPES:
         return False
-    # 스레드 댓글은 공지 본문이 아니다. 스레드를 시작한 원글은 thread_ts와 ts가 같다.
+    if event.get("channel") not in allowed_channel_ids:
+        return False
     thread_ts = event.get("thread_ts")
     if thread_ts is not None and thread_ts != event.get("ts"):
         return False
@@ -44,54 +57,171 @@ def is_new_notice_message(event: Mapping[str, Any]) -> bool:
     )
 
 
+def extract_notice_urls(text: str) -> tuple[tuple[str, str], ...]:
+    """원문에서 처리 대상 URL과 canonical URL 쌍을 원래 순서대로 반환한다."""
+    links: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for match in URL_PATTERN.finditer(text):
+        original_url = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
+        parsed = urlsplit(original_url)
+        searchable_part = f"{parsed.hostname or ''}{parsed.path}".lower()
+        if not any(keyword in searchable_part for keyword in NOTICE_URL_KEYWORDS):
+            continue
+        canonical_url = canonicalize_url(original_url)
+        if canonical_url in seen:
+            continue
+        seen.add(canonical_url)
+        links.append((original_url, canonical_url))
+    return tuple(links)
+
+
+def canonicalize_url(url: str) -> str:
+    """중복 판정을 위해 scheme·host를 소문자로 만들고 query와 fragment를 제거한다."""
+    parsed = urlsplit(url)
+    path = parsed.path.rstrip("/") or "/"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
+
+
 class NoticeService:
     def __init__(
         self,
+        allowed_channel_ids: Collection[str],
         max_stored_notices: int = DEFAULT_MAX_STORED_NOTICES,
-        summarizer: NoticeSummarizerProtocol | None = None,
+        analyzer: NoticeAnalyzerProtocol | None = None,
     ) -> None:
+        if not allowed_channel_ids:
+            raise ValueError("공지 채널 ID를 하나 이상 설정해야 합니다.")
         if max_stored_notices < 1:
             raise ValueError(
                 f"max_stored_notices는 1 이상이어야 합니다. 전달된 값: {max_stored_notices}"
             )
+        self._allowed_channel_ids = frozenset(allowed_channel_ids)
         self._notices: deque[Notice] = deque(maxlen=max_stored_notices)
-        self._summarizer = summarizer
-        # Bolt는 리스너를 여러 스레드에서 실행하므로 저장과 조회를 잠금으로 보호한다.
+        self._canonical_urls: set[str] = set()
+        self._analyzer = analyzer
         self._lock = threading.Lock()
 
-    def record_channel_message(self, event: Mapping[str, Any]) -> Notice | None:
-        """새 공지로 볼 메시지면 요약을 붙여 저장하고 반환한다. 아니면 None을 반환한다."""
-        if not is_new_notice_message(event):
-            return None
+    def accepts_message(
+        self,
+        event: Mapping[str, Any],
+        bot_user_id: str | None,
+        bot_id: str | None = None,
+    ) -> bool:
+        return is_new_notice_message(
+            event, self._allowed_channel_ids, bot_user_id, bot_id
+        ) and bool(extract_notice_urls(str(event.get("text") or "")))
 
-        channel_id = event["channel"]
-        message_ts = event["ts"]
+    def record_channel_message(
+        self,
+        event: Mapping[str, Any],
+        *,
+        workspace_id: str,
+        source_permalink: str,
+        bot_user_id: str | None = None,
+        bot_id: str | None = None,
+    ) -> list[Notice]:
+        """처리 가능한 링크마다 공지를 하나씩 만들고 중복 링크는 건너뛴다."""
+        if not workspace_id or not source_permalink:
+            raise ValueError("workspace_id와 source_permalink는 비어 있을 수 없습니다.")
+        if not is_new_notice_message(event, self._allowed_channel_ids, bot_user_id, bot_id):
+            return []
+
+        channel_id = str(event["channel"])
+        message_ts = str(event["ts"])
         text = str(event["text"]).strip()
-        notice = Notice(
-            channel_id=channel_id,
-            message_ts=message_ts,
-            text=text,
-            summary=self._summarize(channel_id, message_ts, text),
+        posted_at = datetime.fromtimestamp(float(message_ts), timezone.utc).astimezone(
+            SEOUL_TIMEZONE
         )
-        with self._lock:
-            self._notices.appendleft(notice)
-        return notice
+        created: list[Notice] = []
+
+        for original_url, canonical_url in extract_notice_urls(text):
+            with self._lock:
+                if canonical_url in self._canonical_urls:
+                    continue
+                self._canonical_urls.add(canonical_url)
+
+            notice = self._build_notice(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                text=text,
+                original_url=original_url,
+                canonical_url=canonical_url,
+                source_permalink=source_permalink,
+                posted_at=posted_at,
+            )
+            self._store_notice(notice)
+            created.append(notice)
+        return created
 
     def recent_notices(self, limit: int) -> list[Notice]:
-        """최신 공지부터 최대 limit건을 반환한다."""
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
         with self._lock:
             return list(self._notices)[:limit]
 
-    def _summarize(self, channel_id: str, message_ts: str, text: str) -> str | None:
-        if self._summarizer is None:
-            return None
-        try:
-            return self._summarizer.summarize(text)
-        except AiClientError as error:
-            # 공지 원문은 개인정보가 있을 수 있어 로그에 남기지 않는다.
-            logger.warning(
-                "공지 AI 요약 실패: channel=%s ts=%s 원인=%s", channel_id, message_ts, error
+    def _build_notice(
+        self,
+        *,
+        workspace_id: str,
+        channel_id: str,
+        message_ts: str,
+        text: str,
+        original_url: str,
+        canonical_url: str,
+        source_permalink: str,
+        posted_at: datetime,
+    ) -> Notice:
+        if self._analyzer is None:
+            return Notice(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                text=text,
+                original_url=original_url,
+                canonical_url=canonical_url,
+                source_permalink=source_permalink,
+                posted_at=posted_at,
+                processing_status="ai_disabled",
             )
-            return None
+        try:
+            analysis = self._analyzer.analyze(text, original_url, posted_at)
+        except AiClientError as error:
+            logger.warning(
+                "공지 AI 분석 실패: channel=%s ts=%s url=%s 원인=%s",
+                channel_id,
+                message_ts,
+                canonical_url,
+                error,
+            )
+            return Notice(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                text=text,
+                original_url=original_url,
+                canonical_url=canonical_url,
+                source_permalink=source_permalink,
+                posted_at=posted_at,
+                processing_status="processing_failed",
+                last_error=str(error),
+            )
+        return Notice(
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            text=text,
+            original_url=original_url,
+            canonical_url=canonical_url,
+            source_permalink=source_permalink,
+            posted_at=posted_at,
+            processing_status="processed",
+            analysis=analysis,
+        )
+
+    def _store_notice(self, notice: Notice) -> None:
+        with self._lock:
+            if len(self._notices) == self._notices.maxlen:
+                removed = self._notices[-1]
+                self._canonical_urls.discard(removed.canonical_url)
+            self._notices.appendleft(notice)

@@ -1,16 +1,24 @@
-"""공지 도메인 데이터 구조.
-
-현재는 연결 테스트용으로 메모리에만 보관한다. DB 저장 모델은 DB를 정한 뒤(D-006 합의) 정의한다.
-"""
+"""공지 도메인의 메모리 데이터 구조."""
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
+
+from seulseul.ai.model import NoticeAnalysis
+
+ProcessingStatus = Literal["processed", "processing_failed", "ai_disabled"]
 
 
 @dataclass(frozen=True)
 class Notice:
+    workspace_id: str
     channel_id: str
-    # Slack 메시지 ts. 같은 채널 안에서 메시지를 구분하는 값이다.
     message_ts: str
     text: str
-    # AI 요약. AI를 쓰지 않거나 요약에 실패하면 None이다.
-    summary: str | None = None
+    original_url: str
+    canonical_url: str
+    source_permalink: str
+    posted_at: datetime
+    processing_status: ProcessingStatus
+    analysis: NoticeAnalysis | None = None
+    last_error: str | None = None

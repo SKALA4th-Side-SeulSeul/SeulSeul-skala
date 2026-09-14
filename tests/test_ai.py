@@ -1,29 +1,34 @@
-"""AI 클라이언트와 공지 요약기가 실제 AI 서버 없이 올바르게 동작하는지 확인한다."""
+"""AI 클라이언트와 구조화된 공지 분석을 실제 외부 API 없이 검증한다."""
 
 import json
 from collections.abc import Callable
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
 from seulseul.ai.client import AiClientError, OpenAICompatibleChatClient
-from seulseul.ai.service import (
-    SUMMARY_SYSTEM_PROMPT,
-    NoticeSummarizer,
-    remove_reasoning_blocks,
-)
+from seulseul.ai.model import NoticeAnalysis
+from seulseul.ai.service import MAX_NOTICE_INPUT_CHARS, NoticeAnalyzer, parse_notice_analysis
 
 SECRET_API_KEY = "nvapi-test-secret-key"
+SEOUL = ZoneInfo("Asia/Seoul")
+POSTED_AT = datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL)
 
 
 def create_client(
-    handler: Callable[[httpx.Request], httpx.Response], timeout_seconds: float = 5.0
+    handler: Callable[[httpx.Request], httpx.Response],
+    timeout_seconds: float = 5.0,
+    *,
+    disable_thinking: bool = False,
 ) -> OpenAICompatibleChatClient:
     return OpenAICompatibleChatClient(
         base_url="https://ai.example.test/v1",
         api_key=SECRET_API_KEY,
         model="test-model",
         timeout_seconds=timeout_seconds,
+        disable_thinking=disable_thinking,
         transport=httpx.MockTransport(handler),
     )
 
@@ -34,123 +39,155 @@ def completion_response(content: object) -> httpx.Response:
     )
 
 
-class FakeChatClient:
-    """실제 AI 대신 정해진 답변을 돌려주고 받은 프롬프트를 기록한다."""
+def analysis_json(**overrides: str) -> str:
+    payload = {
+        "title": "과제 제출",
+        "summary": "과제를 폼으로 제출합니다.",
+        "deadline_at": "2026-09-20T23:59:00+09:00",
+        "deadline_source_text": "9월 20일까지",
+    }
+    payload.update(overrides)
+    return json.dumps(payload, ensure_ascii=False)
 
-    def __init__(self, response: str) -> None:
-        self.response = response
+
+class SequenceChatClient:
+    def __init__(self, responses: list[str | AiClientError]) -> None:
+        self.responses = responses
         self.calls: list[tuple[str, str]] = []
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         self.calls.append((system_prompt, user_prompt))
-        return self.response
+        response = self.responses[len(self.calls) - 1]
+        if isinstance(response, AiClientError):
+            raise response
+        return response
 
 
-def test_complete_sends_openai_compatible_request() -> None:
+def test_complete_sends_decided_nvidia_parameters() -> None:
     captured_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_requests.append(request)
-        return completion_response("요약: 테스트")
+        return completion_response(analysis_json())
 
-    result = create_client(handler).complete("시스템 지시", "사용자 입력")
+    result = create_client(handler, disable_thinking=True).complete("시스템 지시", "사용자 입력")
 
-    assert result == "요약: 테스트"
-    request = captured_requests[0]
-    assert str(request.url) == "https://ai.example.test/v1/chat/completions"
-    assert request.headers["Authorization"] == f"Bearer {SECRET_API_KEY}"
-    body = json.loads(request.content)
-    assert body["model"] == "test-model"
-    assert body["messages"] == [
-        {"role": "system", "content": "시스템 지시"},
-        {"role": "user", "content": "사용자 입력"},
-    ]
+    assert result == analysis_json()
+    body = json.loads(captured_requests[0].content)
+    assert body["temperature"] == 0.2
+    assert body["top_p"] == 0.8
+    assert body["max_tokens"] == 512
     assert body["stream"] is False
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
-def test_complete_reports_status_code_without_leaking_api_key() -> None:
+@pytest.mark.parametrize(("status", "retryable"), [(401, False), (429, True), (500, True)])
+def test_complete_classifies_retryable_statuses(status: int, retryable: bool) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"error": "invalid api key"})
+        return httpx.Response(status, text="error", headers={"Retry-After": "3"})
 
     with pytest.raises(AiClientError) as error:
         create_client(handler).complete("시스템", "사용자")
 
-    assert "상태 코드: 401" in str(error.value)
+    assert error.value.retryable is retryable
+    assert error.value.retry_after_seconds == 3
     assert SECRET_API_KEY not in str(error.value)
 
 
-def test_complete_reports_timeout_with_limit() -> None:
+def test_complete_reports_timeout_as_retryable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out", request=request)
 
-    with pytest.raises(AiClientError, match="5초 안에 오지 않았습니다"):
-        create_client(handler, timeout_seconds=5.0).complete("시스템", "사용자")
-
-
-def test_complete_reports_unreachable_server() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
-
-    with pytest.raises(AiClientError, match="연결하지 못했습니다.*ConnectError"):
+    with pytest.raises(AiClientError, match="5초 안에 오지 않았습니다") as error:
         create_client(handler).complete("시스템", "사용자")
 
+    assert error.value.retryable
+
+
+def test_complete_rejects_unexpected_response_shape() -> None:
+    with pytest.raises(AiClientError, match="OpenAI 호환"):
+        create_client(lambda request: httpx.Response(200, json={})).complete("시스템", "사용자")
+
+
+def test_analyzer_returns_validated_json_result() -> None:
+    client = SequenceChatClient([analysis_json()])
+    analyzer = NoticeAnalyzer(client, sleeper=lambda seconds: None)
+
+    result = analyzer.analyze(
+        "9월 20일까지 과제를 제출하세요.", "https://forms.example.test/task", POSTED_AT
+    )
+
+    assert result == NoticeAnalysis(
+        title="과제 제출",
+        summary="과제를 폼으로 제출합니다.",
+        deadline_at=datetime(2026, 9, 20, 23, 59, tzinfo=SEOUL),
+        deadline_source_text="9월 20일까지",
+    )
+    assert "대상 링크: https://forms.example.test/task" in client.calls[0][1]
+    assert POSTED_AT.isoformat() in client.calls[0][1]
+
+
+def test_analyzer_retries_invalid_json_with_decided_delays() -> None:
+    client = SequenceChatClient(["not-json", "still-not-json", analysis_json()])
+    delays: list[float] = []
+    analyzer = NoticeAnalyzer(client, sleeper=delays.append)
+
+    result = analyzer.analyze(
+        "9월 20일까지 과제를 제출하세요.", "https://docs.example.test/task", POSTED_AT
+    )
+
+    assert result.title == "과제 제출"
+    assert len(client.calls) == 3
+    assert delays == [2.0, 8.0]
+
+
+def test_analyzer_obeys_retry_after() -> None:
+    client = SequenceChatClient(
+        [AiClientError("rate limited", retry_after_seconds=7), analysis_json()]
+    )
+    delays: list[float] = []
+
+    NoticeAnalyzer(client, sleeper=delays.append).analyze(
+        "9월 20일까지 제출", "https://forms.example.test/task", POSTED_AT
+    )
+
+    assert delays == [7]
+
+
+def test_analyzer_does_not_retry_non_retryable_error() -> None:
+    client = SequenceChatClient([AiClientError("unauthorized", retryable=False)])
+
+    with pytest.raises(AiClientError, match="unauthorized"):
+        NoticeAnalyzer(client, sleeper=lambda seconds: None).analyze(
+            "9월 20일까지 제출", "https://forms.example.test/task", POSTED_AT
+        )
+
+    assert len(client.calls) == 1
+
+
+def test_analyzer_rejects_oversized_notice_without_truncating_or_calling_ai() -> None:
+    client = SequenceChatClient([analysis_json()])
+
+    with pytest.raises(AiClientError, match="입력 제한") as error:
+        NoticeAnalyzer(client, sleeper=lambda seconds: None).analyze(
+            "가" * (MAX_NOTICE_INPUT_CHARS + 1),
+            "https://forms.example.test/task",
+            POSTED_AT,
+        )
+
+    assert not error.value.retryable
+    assert client.calls == []
+
 
 @pytest.mark.parametrize(
-    "response",
+    "raw_output",
     [
-        httpx.Response(200, text="not json"),
-        httpx.Response(200, json={}),
-        httpx.Response(200, json={"choices": []}),
-        httpx.Response(200, json={"choices": [{"message": {}}]}),
-        completion_response(None),
+        analysis_json(deadline_at="2026-09-10T23:59:00+09:00"),
+        analysis_json(deadline_at="2026-09-20T23:59:00"),
+        analysis_json(deadline_source_text="원문에 없는 날짜"),
+        json.dumps({"title": "제목"}),
     ],
 )
-def test_complete_rejects_unexpected_response_shape(response: httpx.Response) -> None:
-    with pytest.raises(AiClientError, match="모델: test-model"):
-        create_client(lambda request: response).complete("시스템", "사용자")
-
-
-def test_summarize_sends_notice_with_summary_prompt() -> None:
-    client = FakeChatClient("요약: 과제 제출\n할 일:\n- 제출\n마감: 9월 20일")
-
-    summary = NoticeSummarizer(client).summarize("9월 20일까지 과제 제출")
-
-    assert summary == "요약: 과제 제출\n할 일:\n- 제출\n마감: 9월 20일"
-    system_prompt, user_prompt = client.calls[0]
-    assert system_prompt == SUMMARY_SYSTEM_PROMPT
-    assert user_prompt.endswith("9월 20일까지 과제 제출")
-
-
-def test_summarize_sends_only_leading_part_of_long_notice() -> None:
-    client = FakeChatClient("요약: 긴 공지")
-
-    NoticeSummarizer(client, max_input_chars=10).summarize("가" * 20)
-
-    _, user_prompt = client.calls[0]
-    assert user_prompt.endswith("가" * 10)
-    assert "가" * 11 not in user_prompt
-
-
-def test_summarize_raises_when_model_returns_only_reasoning() -> None:
-    client = FakeChatClient("<think>추론만 하고 답을 안 함</think>")
-
-    with pytest.raises(AiClientError, match="빈 요약"):
-        NoticeSummarizer(client).summarize("공지")
-
-
-def test_summarizer_rejects_invalid_input_limit() -> None:
-    with pytest.raises(ValueError, match="전달된 값: 0"):
-        NoticeSummarizer(FakeChatClient("요약"), max_input_chars=0)
-
-
-@pytest.mark.parametrize(
-    ("raw_output", "expected"),
-    [
-        ("<think>생각\n중</think>\n요약: A", "요약: A"),
-        ("<THINK>x</THINK>요약: B", "요약: B"),
-        ("요약: C\n<think>응답 길이 제한으로 닫히지 않은 추론", "요약: C"),
-        ("  요약: D  ", "요약: D"),
-    ],
-)
-def test_remove_reasoning_blocks(raw_output: str, expected: str) -> None:
-    assert remove_reasoning_blocks(raw_output) == expected
+def test_parse_notice_analysis_rejects_invalid_results(raw_output: str) -> None:
+    with pytest.raises(AiClientError):
+        parse_notice_analysis(raw_output, "9월 20일까지 제출", POSTED_AT)
