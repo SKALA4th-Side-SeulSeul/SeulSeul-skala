@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seulseul"
+version = "0.1.0"
+description = "Slack bot that turns notices into student checklists"
+requires-python = ">=3.11,<3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "ruff>=0.6,<1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "TID251"]
+
+# 환경변수는 config.py에서만 읽어 검증 지점을 하나로 유지한다.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.getenv".msg = "환경변수는 seulseul.config에서만 읽습니다."
+"os.environ".msg = "환경변수는 seulseul.config에서만 읽습니다."
+
+[tool.ruff.lint.per-file-ignores]
+"src/seulseul/config.py" = ["TID251"]
