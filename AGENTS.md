@@ -1,26 +1,62 @@
 # SeulSeul 작업 지도
 
-SeulSeul은 Slack 공지를 분석해 학생별 체크리스트를 만들고, 정기적으로 DM 알림을 보내는 작은 Slack 봇입니다.
+이 문서는 사용하는 AI 도구와 관계없이 적용됩니다. Codex는 이 파일을 직접 읽고, Claude Code는 `CLAUDE.md`를 통해 읽습니다. 개인 전역 설정과 충돌하면 이 문서와 아래 기준 문서를 우선합니다.
 
-이 문서는 사용하는 AI 도구와 관계없이 적용됩니다. Codex는 이 파일을 직접 읽고, Claude Code는 `CLAUDE.md`를 통해 읽습니다. 개인 전역 설정과 충돌하면 이 문서와 아래 문서를 우선합니다.
+## 프로젝트 개요
 
-## 먼저 읽기
+- 목적: Slack 공지를 분석해 학생별 체크리스트를 만들고, 완료 여부를 관리하며 DM으로 알리는 Slack 봇
+- 언어: Python 3.11
+- 용어: `docs/PRODUCT.md`의 "용어"
 
-- 설치와 검증 명령: `README.md`
-- 브랜치·커밋·합의가 필요한 파일: `docs/DECISIONS.md` (`COLLABORATION.md`와 다르면 이 문서를 따릅니다)
-- 협업·코드 규칙: `COLLABORATION.md`
-- 패키지 책임과 코드 경계: `docs/ARCHITECTURE.md`
-- 제품 흐름: `docs/PRODUCT.md`
-- 현재 작업: `docs/PLANS.md`
+## 디렉터리 구조
 
-## 에이전트 규칙
+```text
+src/seulseul/
+├── slack/       # 이벤트·화면·Slack API. 업무 규칙과 DB 조작 금지
+├── notices/     # 공지 수집, 채널·URL 검증, 대상 판별
+├── ai/          # NVIDIA API 요약·마감일 추출. 외부 호출은 client.py에만
+├── users/       # 학생·소속·권한·알림 설정
+├── checklists/  # 체크리스트 생성·배정·완료 상태
+├── jobs/        # 정기 작업. 서비스 호출만 하고 업무 규칙 재구현 금지
+├── config.py    # 환경변수를 읽는 유일한 위치
+└── database.py  # DB 연결
+tests/test_<domain>.py  # 도메인별 테스트
+```
 
-- `docs/DECISIONS.md` D-006의 합의가 필요한 파일은 수정 전에 사용자에게 확인합니다.
-- 커밋과 push는 사용자가 요청할 때만 합니다.
+상세 경계와 요청 흐름은 `docs/ARCHITECTURE.md`를 따릅니다.
+
+## 절대 금지
+
+- `config.py` 밖에서 `os.getenv()`, `os.environ` 사용 (Ruff `TID251`이 차단)
+- `slack/client.py`, `ai/client.py` 밖에서 외부 API 호출
+- Slack 핸들러·뷰에서 DB 직접 조작
+- 테스트에서 실제 Slack·NVIDIA API 호출
+- `.env`, 토큰, 실제 사용자 정보 커밋
+- `main` 외 브랜치 생성, 사용자 요청 없는 커밋·push
+- `docs/DECISIONS.md` D-006의 합의 필요 파일을 사용자 확인 없이 수정
+- `docs/DECISIONS.md`의 "포기한 대안"을 사용자 요청 없이 다시 제안
+
+## 정리 규칙
+
+- 작업 중 만든 임시 파일과 디버그 코드는 완료 전에 삭제합니다.
+- `temp_`, `_new`, `_old`, `_backup`이 들어간 파일 이름을 만들지 않습니다.
+- 사용하지 않는 import와 함수는 남기지 않습니다.
+- 코드 변경으로 문서 내용이 달라지면 같은 작업에서 기준 문서를 갱신합니다. 이 문서의 요약도 함께 맞춥니다.
+
+## 커밋과 테스트
+
+- 커밋 메시지: `<타입>: <한국어 설명>` (`feat`, `fix`, `refactor`, `test`, `docs`, `chore`, 상세는 D-005)
+- 동작을 추가하거나 바꾸면 `tests/test_<domain>.py`에 테스트를 추가합니다.
 - 작업을 마치면 `docs/PLANS.md`의 해당 항목을 갱신합니다.
-- 규칙을 바꿀 때는 기준 문서 한 곳만 수정하고, 다른 문서에 내용을 복사하지 않습니다.
-- 도구 전용 규칙이 필요하면 이 문서가 아니라 해당 도구 파일(`CLAUDE.md` 등)에 추가합니다.
+
+## 기준 문서
+
+- 설치와 검증: `README.md`
+- 브랜치·커밋·합의 필요 파일·포기한 대안: `docs/DECISIONS.md` (`COLLABORATION.md`와 다르면 이 문서를 따릅니다)
+- 코드 경계: `docs/ARCHITECTURE.md`
+- 제품 흐름과 용어: `docs/PRODUCT.md`
+- 현재 작업: `docs/PLANS.md`
 
 ## 완료 기준
 
-`./scripts/check.sh`가 통과해야 완료입니다. 이 스크립트는 가상환경 활성화 없이 프로젝트 `.venv`를 사용하며, `.venv`가 없으면 `README.md`의 "개발 시작" 명령을 먼저 실행합니다.
+`./scripts/check.sh`가 통과해야 완료입니다. 가상환경 활성화 없이 프로젝트 `.venv`를 사용하며, `.venv`가 없으면 `README.md`의 "개발 시작" 명령을 먼저 실행합니다.
