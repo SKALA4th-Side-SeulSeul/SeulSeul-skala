@@ -13,7 +13,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from seulseul.ai.client import OpenAICompatibleChatClient
-from seulseul.ai.service import NoticeSummarizer
+from seulseul.ai.service import NoticeAnalyzer
 from seulseul.config import (
     AiSettings,
     ConfigError,
@@ -27,16 +27,19 @@ from seulseul.slack.handlers import register_handlers
 logger = logging.getLogger(__name__)
 
 
-def create_notice_service(ai_settings: AiSettings | None) -> NoticeService:
+def create_notice_service(
+    ai_settings: AiSettings | None, notice_channel_ids: tuple[str, ...]
+) -> NoticeService:
     if ai_settings is None:
-        logger.info("AI_PROVIDER가 비어 있어 AI 요약 없이 공지 원문만 수집합니다.")
-        return NoticeService()
+        logger.info("AI_PROVIDER가 비어 있어 원문 링크만 수집합니다.")
+        return NoticeService(allowed_channel_ids=notice_channel_ids)
 
     client = OpenAICompatibleChatClient(
         base_url=ai_settings.base_url,
         api_key=ai_settings.api_key,
         model=ai_settings.model,
         timeout_seconds=ai_settings.timeout_seconds,
+        disable_thinking=ai_settings.provider == "nvidia",
     )
     # API 키는 로그에 남기지 않는다.
     logger.info(
@@ -45,7 +48,10 @@ def create_notice_service(ai_settings: AiSettings | None) -> NoticeService:
         ai_settings.model,
         ai_settings.base_url,
     )
-    return NoticeService(summarizer=NoticeSummarizer(client))
+    return NoticeService(
+        allowed_channel_ids=notice_channel_ids,
+        analyzer=NoticeAnalyzer(client),
+    )
 
 
 def create_app(settings: SlackSettings, notice_service: NoticeService) -> App:
@@ -67,7 +73,8 @@ def main() -> None:
         logger.error("설정 오류: %s", error)
         sys.exit(1)
 
-    app = create_app(slack_settings, create_notice_service(ai_settings))
+    notice_service = create_notice_service(ai_settings, slack_settings.notice_channels)
+    app = create_app(slack_settings, notice_service)
     logger.info(
         "Socket Mode로 Slack에 연결합니다. 공지 채널 설정 %d개",
         len(slack_settings.notice_channels),

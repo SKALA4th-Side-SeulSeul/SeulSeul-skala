@@ -6,6 +6,7 @@
 
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,9 +26,10 @@ AI_PROVIDERS = ("nvidia", "ollama")
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 # 로컬 모델은 첫 요청에 모델을 메모리에 올리는 시간이 들어 넉넉하게 잡는다.
-DEFAULT_AI_TIMEOUT_SECONDS = 60.0
+DEFAULT_AI_TIMEOUT_SECONDS = 45.0
 # Ollama는 API 키를 검사하지 않지만 OpenAI 호환 요청 형식상 값이 필요하다.
 OLLAMA_PLACEHOLDER_API_KEY = "ollama"
+SLACK_CHANNEL_ID_PATTERN = re.compile(r"^[CG][A-Z0-9]+$")
 
 
 class ConfigError(Exception):
@@ -38,7 +40,7 @@ class ConfigError(Exception):
 class SlackSettings:
     bot_token: str
     app_token: str
-    # 채널 이름(#포함 가능) 또는 채널 ID. 이름을 ID로 바꾸는 일은 Slack 연동 단계에서 한다.
+    # 채널 이름은 바뀔 수 있으므로 Slack 채널 ID만 사용한다.
     notice_channels: tuple[str, ...]
 
 
@@ -58,7 +60,7 @@ def load_slack_settings(environ: Mapping[str, str] | None = None) -> SlackSettin
     environ을 넘기면 .env와 실제 환경변수를 읽지 않는다(테스트용).
     """
     environ = _resolve_environ(environ)
-    _raise_if_missing(environ, list(REQUIRED_TOKEN_PREFIXES))
+    _raise_if_missing(environ, [*REQUIRED_TOKEN_PREFIXES, "SLACK_NOTICE_CHANNELS"])
 
     # 토큰 값은 오류 메시지에 넣지 않는다. 로그에 비밀값이 남는 것을 막기 위함이다.
     for key, prefix in REQUIRED_TOKEN_PREFIXES.items():
@@ -73,6 +75,16 @@ def load_slack_settings(environ: Mapping[str, str] | None = None) -> SlackSettin
         for channel in _read(environ, "SLACK_NOTICE_CHANNELS").split(",")
         if channel.strip()
     )
+    invalid_channels = [
+        channel
+        for channel in notice_channels
+        if SLACK_CHANNEL_ID_PATTERN.fullmatch(channel) is None
+    ]
+    if invalid_channels:
+        raise ConfigError(
+            "SLACK_NOTICE_CHANNELS에는 채널 이름이 아니라 C 또는 G로 시작하는 "
+            f"Slack 채널 ID를 입력하세요. 잘못된 값: {', '.join(invalid_channels)}"
+        )
 
     return SlackSettings(
         bot_token=_read(environ, "SLACK_BOT_TOKEN"),

@@ -16,7 +16,7 @@ from seulseul.config import (
 VALID_ENVIRON = {
     "SLACK_BOT_TOKEN": "xoxb-test-bot-token",
     "SLACK_APP_TOKEN": "xapp-test-app-token",
-    "SLACK_NOTICE_CHANNELS": " #전체공지, C0000000001 ,, #반공지_1 ",
+    "SLACK_NOTICE_CHANNELS": " C0000000001, G0000000002 ,, C0000000003 ",
 }
 
 
@@ -25,7 +25,7 @@ def test_load_slack_settings_parses_tokens_and_channels() -> None:
 
     assert settings.bot_token == "xoxb-test-bot-token"
     assert settings.app_token == "xapp-test-app-token"
-    assert settings.notice_channels == ("#전체공지", "C0000000001", "#반공지_1")
+    assert settings.notice_channels == ("C0000000001", "G0000000002", "C0000000003")
 
 
 def test_load_slack_settings_reports_every_missing_token() -> None:
@@ -57,10 +57,18 @@ def test_load_slack_settings_rejects_wrong_prefix_without_leaking_token(
     assert wrong_value not in message
 
 
-def test_load_slack_settings_allows_empty_notice_channels() -> None:
+def test_load_slack_settings_rejects_empty_notice_channels() -> None:
     environ = {**VALID_ENVIRON, "SLACK_NOTICE_CHANNELS": ""}
 
-    assert load_slack_settings(environ).notice_channels == ()
+    with pytest.raises(ConfigError, match="SLACK_NOTICE_CHANNELS"):
+        load_slack_settings(environ)
+
+
+def test_load_slack_settings_rejects_channel_names() -> None:
+    environ = {**VALID_ENVIRON, "SLACK_NOTICE_CHANNELS": "#전체공지,C0000000001"}
+
+    with pytest.raises(ConfigError, match="Slack 채널 ID.*#전체공지"):
+        load_slack_settings(environ)
 
 
 @pytest.mark.parametrize("provider", ["", "   ", "none", "NONE"])
