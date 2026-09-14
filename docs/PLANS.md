@@ -5,7 +5,7 @@
 ## 1. 개발 기반
 
 - [ ] 두 개발자 환경에서 설치와 `./scripts/check.sh` 통과 확인
-- [ ] 팀원과 상의한 뒤 `COLLABORATION.md`를 `docs/DECISIONS.md` D-003~D-006에 맞춰 갱신
+- [x] `COLLABORATION.md`를 기준 문서 링크 구조로 정리하고 `docs/DECISIONS.md`와의 충돌 해소
 
 ## 2. 첫 번째 기능 흐름
 

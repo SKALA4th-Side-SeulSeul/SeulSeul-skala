@@ -52,7 +52,8 @@ tests/test_<domain>.py  # 도메인별 테스트
 ## 기준 문서
 
 - 설치와 검증: `README.md`
-- 브랜치·커밋·합의 필요 파일·포기한 대안: `docs/DECISIONS.md` (`COLLABORATION.md`와 다르면 이 문서를 따릅니다)
+- 브랜치·커밋·합의 필요 파일·포기한 대안: `docs/DECISIONS.md`
+- 환경변수·코드 규칙과 작업 흐름: `COLLABORATION.md`
 - 코드 경계: `docs/ARCHITECTURE.md`
 - 제품 흐름과 용어: `docs/PRODUCT.md`
 - 현재 작업: `docs/PLANS.md`
