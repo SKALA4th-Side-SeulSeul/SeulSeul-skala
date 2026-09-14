@@ -17,7 +17,9 @@
 | --- | --- | --- |
 | Slack | `SLACK_` | `SLACK_BOT_TOKEN` |
 | 데이터베이스 | `DATABASE_` | `DATABASE_URL` |
-| AI | `NVIDIA_` | `NVIDIA_API_KEY` |
+| AI 공통 | `AI_` | `AI_PROVIDER` |
+| NVIDIA Build API | `NVIDIA_` | `NVIDIA_API_KEY` |
+| Ollama 로컬 LLM | `OLLAMA_` | `OLLAMA_MODEL` |
 | 앱 설정 | `APP_` | `APP_ENV` |
 
 환경변수를 읽는 위치는 `docs/ARCHITECTURE.md`의 경계 규칙을 따릅니다.

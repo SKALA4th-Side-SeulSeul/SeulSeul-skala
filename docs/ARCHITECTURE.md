@@ -6,7 +6,7 @@
 | --- | --- |
 | `src/seulseul/slack/` | Slack 이벤트·상호작용 처리, 화면, Slack API 연동 |
 | `src/seulseul/notices/` | 공지 메시지 수집, 채널 범위와 URL 검증, 대상 판별 |
-| `src/seulseul/ai/` | NVIDIA Build API를 통한 요약·마감일 추출·검증 |
+| `src/seulseul/ai/` | AI 제공자(NVIDIA Build API 또는 Ollama)를 통한 요약·마감일 추출·검증 |
 | `src/seulseul/users/` | 학생, 소속, 권한, 알림 설정 |
 | `src/seulseul/checklists/` | 체크리스트 생성·배정·완료 상태 관리 |
 | `src/seulseul/jobs/` | 정기 실행과 비동기 작업 |

@@ -14,7 +14,7 @@
 src/seulseul/
 ├── slack/       # 이벤트·화면·Slack API. 업무 규칙과 DB 조작 금지
 ├── notices/     # 공지 수집, 채널·URL 검증, 대상 판별
-├── ai/          # NVIDIA API 요약·마감일 추출. 외부 호출은 client.py에만
+├── ai/          # AI(NVIDIA API·Ollama) 요약·마감일 추출. 외부 호출은 client.py에만
 ├── users/       # 학생·소속·권한·알림 설정
 ├── checklists/  # 체크리스트 생성·배정·완료 상태
 ├── jobs/        # 정기 작업. 서비스 호출만 하고 업무 규칙 재구현 금지
@@ -30,7 +30,7 @@ tests/test_<domain>.py  # 도메인별 테스트
 - `config.py` 밖에서 `os.getenv()`, `os.environ` 사용 (Ruff `TID251`이 차단)
 - `slack/client.py`, `ai/client.py` 밖에서 외부 API 호출
 - Slack 핸들러·뷰에서 DB 직접 조작
-- 테스트에서 실제 Slack·NVIDIA API 호출
+- 테스트에서 실제 Slack·AI(NVIDIA·Ollama) API 호출
 - `.env`, 토큰, 실제 사용자 정보 커밋
 - `main` 외 브랜치 생성, 사용자 요청 없는 커밋·push
 - `docs/DECISIONS.md` D-006의 합의 필요 파일을 사용자 확인 없이 수정
