@@ -1,6 +1,7 @@
 """학생 가입·해지와 Slack 성명의 소속 판별 규칙."""
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from seulseul.users.model import Student
@@ -40,8 +41,11 @@ def parse_student_real_name(real_name: str) -> StudentAffiliation:
 
 
 class StudentService:
-    def __init__(self, repository: StudentRepository) -> None:
+    def __init__(
+        self, repository: StudentRepository, on_change: Callable[[], None] = lambda: None
+    ) -> None:
         self._repository = repository
+        self._on_change = on_change
 
     def enroll(self, workspace_id: str, slack_user_id: str, real_name: str) -> Student:
         """성명을 검증하고 학생을 새로 저장하거나 최신 소속으로 갱신한다."""
@@ -56,10 +60,13 @@ class StudentService:
             class_number=affiliation.class_number,
         )
         self._repository.save(student)
+        self._on_change()
         return student
 
     def withdraw(self, workspace_id: str, slack_user_id: str) -> bool:
         """학생 개인정보와 외래 키로 연결된 개인 체크리스트를 삭제한다."""
         if not workspace_id or not slack_user_id:
             raise ValueError("workspace_id와 slack_user_id는 비어 있을 수 없습니다.")
-        return self._repository.delete(workspace_id, slack_user_id)
+        deleted = self._repository.delete(workspace_id, slack_user_id)
+        self._on_change()
+        return deleted

@@ -7,6 +7,8 @@
 - 목적: Slack 공지를 분석해 학생별 체크리스트를 만들고, 완료 여부를 관리하며 DM으로 알리는 Slack 봇
 - 언어: Python 3.11
 - 학생 소속: Slack 성명(`profile.real_name`)의 `4기_광주_<1~4>반_<이름>`으로 판별 (D-021)
+- 실패 공지 복구: 운영자용 `python -m seulseul.notices.retry` CLI (사용법은 `README.md`, 정책은 D-022)
+- 학생 화면: 시작·해지 명령만 사용, 매일 서울 오전 9시 개인 DM과 당일 메시지 갱신·완료/취소 버튼 (D-023)
 - 용어: `docs/PRODUCT.md`의 "용어"
 
 ## 디렉터리 구조

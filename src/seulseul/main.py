@@ -8,24 +8,32 @@ Slack Socket Mode로 연결하므로 공개 URL 없이 로컬에서 실행할 �
 
 import logging
 import sys
+from collections.abc import Callable
+from threading import Event
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from seulseul.ai.client import OpenAICompatibleChatClient
 from seulseul.ai.service import NoticeAnalyzer
+from seulseul.checklists.repository import SqlAlchemyChecklistRepository
+from seulseul.checklists.service import DailyChecklistService
 from seulseul.config import (
     AiSettings,
     ConfigError,
     SlackSettings,
     load_ai_settings,
     load_database_settings,
+    load_notice_targets,
     load_slack_settings,
 )
 from seulseul.database import create_database_engine, create_session_factory
+from seulseul.jobs.scheduler import ChecklistScheduler
+from seulseul.jobs.tasks import refresh_daily_checklists
 from seulseul.notices.repository import NoticeRepository, SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeService
-from seulseul.slack.handlers import register_handlers
+from seulseul.slack.client import SlackChecklistClient
+from seulseul.slack.handlers import register_checklist_handlers, register_handlers
 from seulseul.users.repository import SqlAlchemyStudentRepository
 from seulseul.users.service import StudentService
 
@@ -36,10 +44,13 @@ def create_notice_service(
     ai_settings: AiSettings | None,
     notice_channel_ids: tuple[str, ...],
     repository: NoticeRepository,
+    on_change: Callable[[], None] = lambda: None,
 ) -> NoticeService:
     if ai_settings is None:
         logger.info("AI_PROVIDER가 비어 있어 원문 링크만 수집합니다.")
-        return NoticeService(allowed_channel_ids=notice_channel_ids, repository=repository)
+        return NoticeService(
+            allowed_channel_ids=notice_channel_ids, repository=repository, on_change=on_change
+        )
 
     client = OpenAICompatibleChatClient(
         base_url=ai_settings.base_url,
@@ -59,6 +70,7 @@ def create_notice_service(
         allowed_channel_ids=notice_channel_ids,
         analyzer=NoticeAnalyzer(client),
         repository=repository,
+        on_change=on_change,
     )
 
 
@@ -82,6 +94,7 @@ def main() -> None:
         slack_settings = load_slack_settings()
         ai_settings = load_ai_settings()
         database_settings = load_database_settings()
+        notice_targets = load_notice_targets(slack_settings.notice_channels)
     except ConfigError as error:
         logger.error("설정 오류: %s", error)
         sys.exit(1)
@@ -94,14 +107,33 @@ def main() -> None:
         ai_settings,
         slack_settings.notice_channels,
         notice_repository,
+        (wakeup := Event()).set,
     )
-    student_service = StudentService(student_repository)
+    student_service = StudentService(student_repository, on_change=wakeup.set)
     app = create_app(slack_settings, notice_service, student_service)
+    messenger = SlackChecklistClient.from_token(slack_settings.bot_token)
+    checklist_service = DailyChecklistService(
+        SqlAlchemyChecklistRepository(session_factory),
+        messenger,
+        messenger.workspace_id(),
+        notice_targets,
+        notify=wakeup.set,
+    )
+    register_checklist_handlers(app, checklist_service)
+    scheduler = ChecklistScheduler(
+        lambda: refresh_daily_checklists(checklist_service, scheduler.stopped.is_set),
+        wakeup,
+    )
     logger.info(
         "Socket Mode로 Slack에 연결합니다. 공지 채널 설정 %d개",
         len(slack_settings.notice_channels),
     )
-    SocketModeHandler(app, slack_settings.app_token).start()
+    scheduler.start()
+    try:
+        SocketModeHandler(app, slack_settings.app_token).start()
+    finally:
+        scheduler.stop()
+        engine.dispose()
 
 
 if __name__ == "__main__":

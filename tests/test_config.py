@@ -10,6 +10,7 @@ from seulseul.config import (
     AiSettings,
     ConfigError,
     load_ai_settings,
+    load_notice_targets,
     load_slack_settings,
 )
 
@@ -152,3 +153,30 @@ def test_load_ai_settings_rejects_invalid_timeout(raw_timeout: str) -> None:
 
     with pytest.raises(ConfigError, match=f"현재 값: {raw_timeout}"):
         load_ai_settings(environ)
+
+
+def test_notice_targets_are_explicit_and_match_every_allowed_channel() -> None:
+    assert load_notice_targets(
+        ("CONE", "GTWO"),
+        {
+            "SLACK_NOTICE_TARGETS": "CONE=all, GTWO=3",
+        },
+    ) == {"CONE": None, "GTWO": 3}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "CONE=all",
+        "CONE=all,GTWO=0",
+        "CONE=all,GTWO=5",
+        "CONE=all,GTWO=all,CEXTRA=3",
+        "CONE=all,CONE=3",
+        "CONE=all,GTWO=3,",
+        "CONE,GTWO",
+    ],
+)
+def test_notice_targets_reject_ambiguous_or_missing_targets(raw: str) -> None:
+    with pytest.raises(ConfigError, match="SLACK_NOTICE_TARGETS"):
+        load_notice_targets(("CONE", "GTWO"), {"SLACK_NOTICE_TARGETS": raw})
