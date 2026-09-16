@@ -28,7 +28,7 @@ class NoticeRepository(Protocol):
 
     def add(self, notice: Notice) -> bool: ...
 
-    def recent(self, limit: int) -> list[Notice]: ...
+    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]: ...
 
 
 class InMemoryNoticeRepository:
@@ -55,9 +55,12 @@ class InMemoryNoticeRepository:
             self._canonical_urls.add(identity)
             return True
 
-    def recent(self, limit: int) -> list[Notice]:
+    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
         with self._lock:
-            return list(self._notices)[:limit]
+            notices = self._notices
+            if workspace_id is not None:
+                return [notice for notice in notices if notice.workspace_id == workspace_id][:limit]
+            return list(notices)[:limit]
 
 
 class SqlAlchemyNoticeRepository:
@@ -90,13 +93,13 @@ class SqlAlchemyNoticeRepository:
             session.commit()
             return inserted_id is not None
 
-    def recent(self, limit: int) -> list[Notice]:
-        statement = (
-            select(NoticeModel)
-            .where(NoticeModel.deleted_at.is_(None))
-            .order_by(NoticeModel.posted_at.desc(), NoticeModel.created_at.desc())
-            .limit(limit)
-        )
+    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
+        statement = select(NoticeModel).where(NoticeModel.deleted_at.is_(None))
+        if workspace_id is not None:
+            statement = statement.where(NoticeModel.workspace_id == workspace_id)
+        statement = statement.order_by(
+            NoticeModel.posted_at.desc(), NoticeModel.created_at.desc()
+        ).limit(limit)
         with self._session_factory() as session:
             models = session.execute(statement).scalars().all()
             return [_to_notice(model) for model in models]

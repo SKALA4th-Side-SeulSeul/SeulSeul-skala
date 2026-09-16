@@ -16,6 +16,9 @@
 ## 경계 규칙
 
 - 외부 API 호출은 `slack/client.py`, `ai/client.py`에만 둡니다.
+- Slack 명령은 핸들러에서 먼저 `ack()`로 수신을 확인한 뒤 처리합니다. HTTP 요청을 보내는
+  Bolt의 `respond` 콜백은 `slack/client.py`의 `SlackCommandResponder`에서만 호출하며,
+  응답은 명령 실행자에게만 보이는 `ephemeral`로 전송합니다.
 - 업무 규칙은 도메인별 `service.py`가 담당합니다.
 - DB 모델은 도메인별 `model.py`에 두고, 연결은 `database.py`, 도메인별 DB 조작은
   `repository.py`가 관리합니다.

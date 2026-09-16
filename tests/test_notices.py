@@ -74,8 +74,11 @@ class FakeNoticeRepository:
         self.notices.append(notice)
         return True
 
-    def recent(self, limit: int) -> list[Notice]:
-        return list(reversed(self.notices))[:limit]
+    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
+        notices = reversed(self.notices)
+        if workspace_id is not None:
+            return [notice for notice in notices if notice.workspace_id == workspace_id][:limit]
+        return list(notices)[:limit]
 
 
 def record(service: NoticeService, event: dict[str, Any] | None = None) -> list[Notice]:
@@ -231,6 +234,21 @@ def test_recent_notices_are_newest_first_and_bounded() -> None:
         "https://forms.example.test/task-2",
         "https://forms.example.test/task-1",
     ]
+
+
+def test_recent_notices_can_be_limited_to_workspace() -> None:
+    service = NoticeService({ALLOWED_CHANNEL})
+    record(service)
+    service.record_channel_message(
+        channel_message(text="9월 20일까지 https://forms.example.test/other"),
+        workspace_id="TOTHERWORKSPACE",
+        source_permalink=PERMALINK,
+    )
+
+    notices = service.recent_notices(5, workspace_id=WORKSPACE_ID)
+
+    assert len(notices) == 1
+    assert notices[0].workspace_id == WORKSPACE_ID
 
 
 def test_service_requires_at_least_one_channel_and_positive_limits() -> None:
