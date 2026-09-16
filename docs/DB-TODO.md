@@ -7,6 +7,8 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 ## 전제
 
 - DB: PostgreSQL, SQLAlchemy, Alembic (D-016)
+- 환경 분리: 로컬은 `compose.yaml`로 PostgreSQL만 실행하고 Python 앱은 호스트에서 실행합니다. 운영 서버는 `compose.prod.yaml`로 봇과 PostgreSQL을 함께 실행합니다.
+- 로컬·운영은 PostgreSQL 메이저 버전과 Alembic 마이그레이션만 공유하고, DB 이름·계정·비밀번호·볼륨은 분리합니다.
 - 운영 AI: NVIDIA Build API (D-017). **서버에서는 Ollama를 실행하지 않습니다.** Ollama는 로컬 개발용입니다.
 - Slack: Socket Mode (D-018). 서버에 들어오는 포트를 열지 않습니다.
 - 서버: 이미 생성된 Oracle Cloud VM 한 대. 배포 계정 `seulseul`의 **Rootless Docker**로 Docker Compose를 실행합니다.
@@ -80,7 +82,7 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [ ] 배포 방식 기록: 기존 Oracle ARM VM(Ubuntu 24.04) + `seulseul` Rootless Docker Compose, 서버 Ollama 미사용 → D-007 후속 결정
 - [ ] 배포 계정 권한 구조(Rootless Docker, 비밀번호 로그인 그룹, fail2ban 계정별 기준) 결정 기록
 - [ ] NVIDIA로 전송할 공지 데이터와 개인정보 처리 정책 (`docs/PLANS.md` 5단계)
-- [ ] DB 드라이버 선택 (`pyproject.toml`은 D-006 합의 필요 파일)
+- [x] DB 드라이버 선택: Psycopg 3.3 binary + SQLAlchemy 2.0 동기 엔진 (D-020)
 
 ## 1. 로컬
 
@@ -88,24 +90,19 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 
 의존성 추가, 연결·세션, 모델·첫 마이그레이션은 `docs/PLANS.md` 4단계를 따릅니다. 여기서는 Docker 관련 작업만 다룹니다.
 
-- [ ] `compose.yaml`에 개발용 `postgres` 서비스 추가. 로컬에서는 포트를 `127.0.0.1:5432`에만 연결하고, 서버용 설정에서는 포트를 공개하지 않음
-- [ ] `.env.example`의 `DATABASE_URL` 형식 주석 채우기 (값은 비움)
-- [ ] DB 테스트 방식 결정: 테스트 전용 DB 또는 컨테이너 사용. 서버 DB는 테스트에 쓰지 않음
+- [x] `compose.yaml`에 로컬 개발용 `postgres` 서비스만 추가. 포트는 `127.0.0.1:5432`에만 연결하고 개발 전용 named volume 사용
+- [x] `.env.example`의 로컬 `DATABASE_URL` 형식 주석 채우기 (값은 비움, 호스트는 `127.0.0.1`)
+- [x] DB 테스트 방식 결정: 단위 테스트는 실제 DB 없이 실행하고, 마이그레이션·통합 테스트는 로컬 개발 DB만 사용. 서버 DB는 테스트에 쓰지 않음
 
-### 1-2. 봇 Docker 이미지
+### 1-2. 로컬 앱 실행
 
-- [ ] 하위 패키지 `__init__.py` 추가 (D-001 결과 항목. 없으면 이미지 설치본에서 하위 패키지가 빠짐)
-- [ ] `config.py`의 `.env` 경로 전제 정리. 컨테이너에서는 `.env` 파일 대신 Compose가 환경변수를 넣음
-- [ ] `Dockerfile`: `python:3.11-slim` 기반, 컨테이너 안에서도 비루트 사용자로 실행, 의존성 설치 레이어 분리
-- [ ] `.dockerignore`: `.env`, `.venv/`, 캐시, `.git/` 제외
-- [ ] `compose.yaml`에 `bot` 서비스 추가, `postgres` 준비 확인(healthcheck) 후 시작
-- [ ] 로컬 `docker compose up`으로 봇 + DB 동작 확인. 로컬 Ollama를 쓸 때는 `OLLAMA_BASE_URL=http://host.docker.internal:11434/v1`
-- [ ] 서버와 같은 `linux/arm64`로 빌드되는지 확인 (`docker buildx build --platform linux/arm64`)
-- [ ] 서버의 Rootless Docker에서도 같은 `compose.yaml`이 동작하는지 확인
+- [x] `docker compose up -d postgres`로 DB만 실행하고 Python 앱은 프로젝트 `.venv`에서 실행
+- [ ] 로컬 앱이 `127.0.0.1:5432`의 개발 DB에 연결하고 Alembic 마이그레이션을 적용하는지 확인
+- [ ] 로컬 Ollama 사용 시 `OLLAMA_BASE_URL=http://localhost:11434/v1`로 연결
 
 ### 1-3. 메모리 측정
 
-- [ ] 공지 수신·AI 분석·명령어 응답을 몇 번 실행하면서 `docker stats`로 `bot`, `postgres` 메모리 최대치 기록
+- [ ] 공지 수신·AI 분석·명령어 응답을 몇 번 실행하면서 호스트의 Python 봇 프로세스와 `docker stats`의 `postgres` 메모리 최대치 기록
 - [ ] 측정값을 바탕으로 2-4의 제한값 확정 (측정값 + 여유 50% 정도, 합계 6GB 이하)
 
 ## 2. 서버 (Oracle Cloud)
@@ -137,13 +134,21 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [ ] SSH 그룹 규칙 적용값 확인: `seulseul`은 `passwordauthentication yes`, 포워딩·에이전트·X11·터널 `no`
 - [ ] fail2ban 기준값 확인: `sshd-seulseul` `5 / 3600 / 86400`, `sshd` `2 / 36000 / 5184000`
 
-### 2-3. 배포 (`seulseul` 계정)
+### 2-3. 운영 이미지와 배포 (`seulseul` 계정)
 
-- [ ] `~/app`에 저장소 clone, 서버 전용 `~/app/.env` 작성(권한 600): **운영용 Slack 앱 토큰**, `DATABASE_URL`, `AI_PROVIDER=nvidia`, `OLLAMA_*`는 비움
-- [ ] 마이그레이션 적용 후 봇 시작
+- [x] 하위 패키지 `__init__.py` 추가 (D-001 결과 항목. 없으면 이미지 설치본에서 하위 패키지가 빠짐)
+- [x] `config.py`의 `.env` 경로 전제 정리. 컨테이너에서는 Compose가 환경변수를 넣음
+- [x] `Dockerfile`: `python:3.11-slim` 기반, 컨테이너 안에서도 비루트 사용자로 실행, 의존성 설치 레이어 분리
+- [x] `.dockerignore`: `.env`, `.venv/`, 캐시, `.git/` 제외
+- [x] `compose.prod.yaml`에 `bot`과 `postgres` 서비스 추가. PostgreSQL 포트는 공개하지 않고 운영 전용 named volume과 healthcheck 사용
+- [x] 운영 DB는 로컬과 다른 DB 이름·계정·비밀번호를 사용하고 `DATABASE_URL`의 호스트는 Compose 서비스명 `postgres`로 설정
+- [x] 서버와 같은 `linux/arm64` 이미지 빌드 확인 (`docker build --platform linux/arm64`)
+- [ ] 서버의 Rootless Docker에서 `compose.prod.yaml` 동작 확인
+- [ ] `~/app`에 저장소 clone, 서버 전용 `~/app/.env` 작성(권한 600): **운영용 Slack 앱 토큰**, 운영 DB 접속 정보, `AI_PROVIDER=nvidia`, `OLLAMA_*`는 비움
+- [ ] `docker compose -f compose.prod.yaml run --rm migrate`로 마이그레이션 적용 후 봇 시작
 - [ ] 봇 컨테이너가 1개만 실행 중인지 확인
-- [ ] `restart: unless-stopped` 설정, VM 재부팅 후 자동 시작 확인
-- [ ] 업데이트 절차 정리: `git pull` → 이미지 빌드 → 마이그레이션 → `docker compose up -d`
+- [ ] `restart: unless-stopped` 설정 완료. VM 재부팅 후 자동 시작은 서버 배포 시 확인
+- [ ] 업데이트 절차 정리: `git pull` → 이미지 빌드 → `docker compose -f compose.prod.yaml run --rm migrate` → `docker compose -f compose.prod.yaml up -d bot`
 
 ### 2-4. 메모리 제한 (합계 최대 6GB)
 
@@ -157,14 +162,14 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 | `ollama` | 실행 안 함 | 서버에서는 사용하지 않음 |
 | **합계** | **2GB** | 상한 6GB 중 남는 4GB는 측정 결과에 따라 늘릴 여유 |
 
-- [ ] `compose.yaml`에 서비스별 메모리 제한 반영, 합계 6GB 이하인지 확인
+- [x] `compose.prod.yaml`에 서비스별 메모리 제한 반영, 합계 6GB 이하인지 확인
 - [ ] 배포 후 하루 정도 `docker stats`로 사용량 확인. 제한에 가까우면 합계 6GB 안에서 늘림
 
 ### 2-5. 운영
 
 - [ ] 백업: 매일 `pg_dump`를 `~/backups`에 만들고 VM 밖(예: Oracle Object Storage)에도 보관, 최근 7일 유지
 - [ ] 백업 복구 시험 1회
-- [ ] 로그 확인 방법 정리 (`seulseul` 계정에서 `docker compose logs --tail 200 bot`)
+- [ ] 로그 확인 방법 정리 (`seulseul` 계정에서 `docker compose -f compose.prod.yaml logs --tail 200 bot`)
 - [ ] 출시 전 확인: 실제 워크스페이스에서 두 개발자만 알림을 신청한 상태로 전체 흐름 점검
 
 ### 2-6. 업그레이드 후 남은 정리

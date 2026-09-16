@@ -1,0 +1,56 @@
+name: seulseul-prod
+
+x-bot-common: &bot-common
+  build:
+    context: .
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: ${DATABASE_URL:?DATABASE_URL을 운영 서버 .env에 설정하세요}
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:18.6-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB를 운영 서버 .env에 설정하세요}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER를 운영 서버 .env에 설정하세요}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 운영 서버 .env에 설정하세요}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=20
+    restart: unless-stopped
+    mem_limit: 1g
+
+  migrate:
+    <<: *bot-common
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["tools"]
+    mem_limit: 512m
+
+  bot:
+    <<: *bot-common
+    restart: unless-stopped
+    mem_limit: 512m
+
+volumes:
+  postgres_prod_data:

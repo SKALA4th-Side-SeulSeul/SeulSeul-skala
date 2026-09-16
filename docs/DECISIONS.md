@@ -234,3 +234,15 @@
   - 사용자에게 공지 원문 전체를 다시 보여 주지 않습니다. `chat.getPermalink`로 얻은 Slack 원문 링크를 제공해 사용자가 원본 위치로 이동하게 합니다.
   - 원문 링크를 가져오지 못하면 해당 메시지를 공지로 저장하지 않고 원문을 제외한 식별 정보와 오류만 로그에 남깁니다.
 - 이유: 설정하지 않은 채널의 메시지와 원문에 포함된 개인정보가 사용자 응답에 노출되는 일을 막고, 사용자가 필요할 때 Slack의 원래 문맥을 직접 확인할 수 있게 하기 위함입니다.
+
+## D-020 — PostgreSQL·드라이버와 Docker 환경 분리
+
+- 날짜: 2026-09-16
+- 상태: 확정
+- 내용:
+  - PostgreSQL은 `18.6-bookworm` 이미지를 로컬과 운영에서 동일하게 사용합니다. PostgreSQL 18 이미지의 데이터 볼륨은 `/var/lib/postgresql`에 연결합니다.
+  - Python 드라이버는 Psycopg 3의 binary 배포판 `3.3.x`, ORM은 SQLAlchemy `2.0.x`, 마이그레이션은 Alembic `1.x`를 사용합니다. 연결 URL에는 `postgresql+psycopg://`를 명시합니다.
+  - 현재 Slack Bolt 흐름에 맞춰 SQLAlchemy 동기 엔진과 기본 연결 풀을 사용합니다.
+  - 로컬은 `compose.yaml`에서 PostgreSQL만 실행하고 Python 앱은 호스트의 `.venv`에서 실행합니다. 운영은 `compose.prod.yaml`에서 봇과 PostgreSQL을 함께 실행합니다.
+  - 로컬과 운영은 DB 이름·계정·비밀번호·named volume을 분리합니다. 운영 PostgreSQL 포트는 호스트에 공개하지 않습니다.
+- 이유: 로컬 개발 편의와 운영 격리를 확보하면서 ARM64 서버와 Python 3.11에서 동일한 DB 버전과 마이그레이션을 재현하기 위함입니다.

@@ -54,6 +54,11 @@ class AiSettings:
     timeout_seconds: float
 
 
+@dataclass(frozen=True)
+class DatabaseSettings:
+    url: str
+
+
 def load_slack_settings(environ: Mapping[str, str] | None = None) -> SlackSettings:
     """Slack 연결 설정을 읽는다.
 
@@ -128,6 +133,16 @@ def load_ai_settings(environ: Mapping[str, str] | None = None) -> AiSettings | N
         model=_read(environ, "OLLAMA_MODEL"),
         timeout_seconds=timeout_seconds,
     )
+
+
+def load_database_settings(environ: Mapping[str, str] | None = None) -> DatabaseSettings:
+    """PostgreSQL 연결 URL을 읽고 Psycopg 3 형식인지 검증한다."""
+    environ = _resolve_environ(environ)
+    _raise_if_missing(environ, ["DATABASE_URL"])
+    url = _read(environ, "DATABASE_URL")
+    if not url.startswith("postgresql+psycopg://"):
+        raise ConfigError("DATABASE_URL은 postgresql+psycopg:// 형식이어야 합니다.")
+    return DatabaseSettings(url=url)
 
 
 def _resolve_environ(environ: Mapping[str, str] | None) -> Mapping[str, str]:

@@ -6,10 +6,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import CheckConstraint, UniqueConstraint
 
 from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
-from seulseul.notices.model import Notice
+from seulseul.notices.model import Notice, NoticeModel
 from seulseul.notices.service import (
     NoticeService,
     canonicalize_url,
@@ -194,3 +195,28 @@ def test_service_requires_at_least_one_channel_and_positive_limits() -> None:
         NoticeService({ALLOWED_CHANNEL}, max_stored_notices=0)
     with pytest.raises(ValueError, match="전달된 값: -1"):
         NoticeService({ALLOWED_CHANNEL}).recent_notices(-1)
+
+
+def test_notice_model_enforces_link_identity_and_tracks_ai_failures() -> None:
+    table = NoticeModel.__table__
+    unique_constraints = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    check_constraints = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert {
+        "processing_status",
+        "retry_count",
+        "last_error",
+        "next_retry_at",
+        "deleted_at",
+    } <= set(table.columns.keys())
+    assert "uq_notices_workspace_canonical_url" in unique_constraints
+    assert "uq_notices_source_link" in unique_constraints
+    assert "ck_notices_processing_status" in check_constraints
