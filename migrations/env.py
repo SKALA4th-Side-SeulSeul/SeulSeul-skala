@@ -5,13 +5,11 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from seulseul.checklists.model import ChecklistModel
 from seulseul.config import load_database_settings
 from seulseul.database import Base
-from seulseul.notices.model import NoticeModel
-from seulseul.users.model import StudentModel
+from seulseul.models import MAPPED_MODELS
 
-_MAPPED_MODELS = (StudentModel, NoticeModel, ChecklistModel)
+_MAPPED_MODELS = MAPPED_MODELS
 
 config = context.config
 
