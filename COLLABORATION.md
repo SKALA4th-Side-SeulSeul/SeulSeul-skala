@@ -17,6 +17,7 @@
 | --- | --- | --- |
 | Slack | `SLACK_` | `SLACK_BOT_TOKEN` |
 | 데이터베이스 | `DATABASE_` | `DATABASE_URL` |
+| PostgreSQL 컨테이너 | `POSTGRES_` | `POSTGRES_DB` |
 | AI 공통 | `AI_` | `AI_PROVIDER` |
 | NVIDIA Build API | `NVIDIA_` | `NVIDIA_API_KEY` |
 | Ollama 로컬 LLM | `OLLAMA_` | `OLLAMA_MODEL` |

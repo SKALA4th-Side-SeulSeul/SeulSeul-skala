@@ -13,6 +13,17 @@ python -m pip install -e '.[dev]'
 cp .env.example .env
 ```
 
+`.env`에 개발용 `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `DATABASE_URL`을 채운 뒤 PostgreSQL과 마이그레이션을 준비합니다.
+
+```bash
+docker compose up -d postgres
+.venv/bin/alembic upgrade head
+```
+
+로컬에서는 PostgreSQL만 Docker로 실행하고 Python 앱은 `.venv`에서 실행합니다. 개발 DB를 멈출 때는 데이터 볼륨을 보존하도록 `docker compose down`을 사용하며, 데이터 초기화가 목적이 아니면 `-v`를 붙이지 않습니다.
+
+운영 서버에서는 `compose.prod.yaml`을 사용합니다. 운영 절차와 보안 기준은 `docs/DB-TODO.md`를 따릅니다.
+
 ## 검증
 
 ```bash
