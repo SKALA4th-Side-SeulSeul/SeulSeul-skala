@@ -21,7 +21,7 @@ class MessagePermalinkProvider(Protocol):
 
 
 class UserProfileProvider(Protocol):
-    def get_display_name(self, user_id: str) -> str: ...
+    def get_real_name(self, user_id: str) -> str: ...
 
 
 class SlackWebClientProtocol(Protocol):
@@ -35,7 +35,7 @@ class MessagePermalinkError(Exception):
 
 
 class UserProfileError(Exception):
-    """Slack 사용자의 표시 이름을 가져오지 못했을 때 발생한다."""
+    """Slack 사용자의 성명을 가져오지 못했을 때 발생한다."""
 
 
 class SlackWebApiClient:
@@ -54,16 +54,16 @@ class SlackWebApiClient:
             raise MessagePermalinkError("Slack 응답에 원문 링크가 없습니다.")
         return permalink
 
-    def get_display_name(self, user_id: str) -> str:
+    def get_real_name(self, user_id: str) -> str:
         try:
             response = self._client.users_info(user=user_id)
         except SlackClientError as error:
             raise UserProfileError(
-                f"Slack 표시 이름을 가져오지 못했습니다: {type(error).__name__}"
+                f"Slack 성명을 가져오지 못했습니다: {type(error).__name__}"
             ) from error
         user = response.get("user")
         profile = user.get("profile") if isinstance(user, Mapping) else None
-        display_name = profile.get("display_name") if isinstance(profile, Mapping) else None
-        if not isinstance(display_name, str) or not display_name.strip():
-            raise UserProfileError("Slack 프로필에 표시 이름이 설정되어 있지 않습니다.")
-        return display_name.strip()
+        real_name = profile.get("real_name") if isinstance(profile, Mapping) else None
+        if not isinstance(real_name, str) or not real_name.strip():
+            raise UserProfileError("Slack 프로필에 성명이 설정되어 있지 않습니다.")
+        return real_name.strip()

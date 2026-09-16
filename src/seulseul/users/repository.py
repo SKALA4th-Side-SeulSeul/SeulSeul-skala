@@ -56,14 +56,14 @@ class SqlAlchemyStudentRepository:
             .values(
                 workspace_id=student.workspace_id,
                 slack_user_id=student.slack_user_id,
-                display_name=student.display_name,
+                real_name=student.real_name,
                 campus=student.campus,
                 class_number=student.class_number,
             )
             .on_conflict_do_update(
                 constraint="uq_students_workspace_slack_user",
                 set_={
-                    "display_name": student.display_name,
+                    StudentModel.real_name: student.real_name,
                     "campus": student.campus,
                     "class_number": student.class_number,
                     "updated_at": func.now(),
