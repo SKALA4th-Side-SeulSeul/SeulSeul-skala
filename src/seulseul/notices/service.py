@@ -2,7 +2,8 @@
 
 import logging
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -26,6 +27,10 @@ SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 class NoticeAnalyzerProtocol(Protocol):
     def analyze(self, notice_text: str, notice_url: str, posted_at: datetime) -> NoticeAnalysis: ...
+
+
+class NoticeRetryError(Exception):
+    """선택한 공지를 재처리할 수 없을 때 발생한다."""
 
 
 def is_new_notice_message(
@@ -88,6 +93,7 @@ class NoticeService:
         max_stored_notices: int = DEFAULT_MAX_STORED_NOTICES,
         analyzer: NoticeAnalyzerProtocol | None = None,
         repository: NoticeRepository | None = None,
+        on_change: Callable[[], None] = lambda: None,
     ) -> None:
         if not allowed_channel_ids:
             raise ValueError("공지 채널 ID를 하나 이상 설정해야 합니다.")
@@ -98,6 +104,7 @@ class NoticeService:
         self._allowed_channel_ids = frozenset(allowed_channel_ids)
         self._analyzer = analyzer
         self._repository = repository or InMemoryNoticeRepository(max_stored_notices)
+        self._on_change = on_change
 
     def accepts_message(
         self,
@@ -148,12 +155,57 @@ class NoticeService:
             )
             if self._repository.add(notice):
                 created.append(notice)
+                if notice.processing_status == "processed":
+                    self._on_change()
         return created
 
     def recent_notices(self, limit: int, *, workspace_id: str | None = None) -> list[Notice]:
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
         return self._repository.recent(limit, workspace_id)
+
+    def failed_notices(self, limit: int, *, workspace_id: str | None = None) -> list[Notice]:
+        if limit < 1:
+            raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
+        return self._repository.failed(limit, self._allowed_channel_ids, workspace_id)
+
+    def retry_failed_notice(self, workspace_id: str, notice_url: str) -> Notice:
+        """저장된 원문으로 실패 공지 하나를 다시 분석해 같은 기록을 갱신한다."""
+        if self._analyzer is None:
+            raise NoticeRetryError("AI_PROVIDER가 비어 있습니다. AI 설정 후 다시 실행해 주세요.")
+        try:
+            parsed = urlsplit(notice_url)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("Invalid notice URL")
+            canonical_url = canonicalize_url(notice_url)
+        except ValueError as error:
+            raise NoticeRetryError("공지의 올바른 http/https 제출 링크를 입력해 주세요.") from error
+        original = self._repository.get(workspace_id, canonical_url)
+        if original is None or original.deleted_at is not None:
+            raise NoticeRetryError("해당 워크스페이스에서 재처리할 공지를 찾을 수 없습니다.")
+        if original.channel_id not in self._allowed_channel_ids:
+            raise NoticeRetryError("현재 설정된 공지 채널의 공지만 재처리할 수 있습니다.")
+        if original.processing_status != "processing_failed":
+            raise NoticeRetryError("AI 분석에 실패한 공지만 재처리할 수 있습니다.")
+
+        analyzed = self._build_notice(
+            workspace_id=original.workspace_id,
+            channel_id=original.channel_id,
+            message_ts=original.message_ts,
+            text=original.text,
+            original_url=original.original_url,
+            canonical_url=original.canonical_url,
+            source_permalink=original.source_permalink,
+            posted_at=original.posted_at,
+        )
+        # 수정 분석 실패로 남아 있던 기존 요약이 있다면 실패 시에도 유지한다(D-011).
+        if analyzed.processing_status == "processing_failed":
+            analyzed = replace(analyzed, analysis=original.analysis)
+        if not self._repository.replace_failed(original, analyzed):
+            raise NoticeRetryError("분석 중 공지 상태가 변경되었습니다. 목록을 다시 확인해 주세요.")
+        if analyzed.processing_status == "processed":
+            self._on_change()
+        return analyzed
 
     def _build_notice(
         self,

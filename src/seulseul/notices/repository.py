@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Protocol, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,14 @@ class NoticeRepository(Protocol):
     def add(self, notice: Notice) -> bool: ...
 
     def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]: ...
+
+    def failed(
+        self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
+    ) -> list[Notice]: ...
+
+    def get(self, workspace_id: str, canonical_url: str) -> Notice | None: ...
+
+    def replace_failed(self, original: Notice, result: Notice) -> bool: ...
 
 
 class InMemoryNoticeRepository:
@@ -57,10 +65,46 @@ class InMemoryNoticeRepository:
 
     def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
         with self._lock:
-            notices = self._notices
-            if workspace_id is not None:
-                return [notice for notice in notices if notice.workspace_id == workspace_id][:limit]
-            return list(notices)[:limit]
+            return [
+                notice
+                for notice in self._notices
+                if notice.deleted_at is None
+                and (workspace_id is None or notice.workspace_id == workspace_id)
+            ][:limit]
+
+    def failed(
+        self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
+    ) -> list[Notice]:
+        with self._lock:
+            return [
+                notice
+                for notice in self._notices
+                if notice.processing_status == "processing_failed"
+                and notice.deleted_at is None
+                and notice.channel_id in channel_ids
+                and (workspace_id is None or notice.workspace_id == workspace_id)
+            ][:limit]
+
+    def get(self, workspace_id: str, canonical_url: str) -> Notice | None:
+        with self._lock:
+            return next(
+                (
+                    notice
+                    for notice in self._notices
+                    if notice.workspace_id == workspace_id and notice.canonical_url == canonical_url
+                ),
+                None,
+            )
+
+    def replace_failed(self, original: Notice, result: Notice) -> bool:
+        with self._lock:
+            for index, notice in enumerate(self._notices):
+                if notice == original and notice.processing_status == "processing_failed":
+                    if notice.deleted_at is not None:
+                        return False
+                    self._notices[index] = result
+                    return True
+            return False
 
 
 class SqlAlchemyNoticeRepository:
@@ -103,6 +147,66 @@ class SqlAlchemyNoticeRepository:
         with self._session_factory() as session:
             models = session.execute(statement).scalars().all()
             return [_to_notice(model) for model in models]
+
+    def failed(
+        self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
+    ) -> list[Notice]:
+        statement = select(NoticeModel).where(
+            NoticeModel.processing_status == "processing_failed",
+            NoticeModel.deleted_at.is_(None),
+            NoticeModel.channel_id.in_(channel_ids),
+        )
+        if workspace_id is not None:
+            statement = statement.where(NoticeModel.workspace_id == workspace_id)
+        statement = statement.order_by(
+            NoticeModel.posted_at.desc(), NoticeModel.created_at.desc()
+        ).limit(limit)
+        with self._session_factory() as session:
+            return [_to_notice(model) for model in session.execute(statement).scalars().all()]
+
+    def get(self, workspace_id: str, canonical_url: str) -> Notice | None:
+        statement = select(NoticeModel).where(
+            NoticeModel.workspace_id == workspace_id,
+            NoticeModel.canonical_url == canonical_url,
+        )
+        with self._session_factory() as session:
+            model = session.execute(statement).scalar_one_or_none()
+            return _to_notice(model) if model is not None else None
+
+    def replace_failed(self, original: Notice, result: Notice) -> bool:
+        # 분석 중 다른 요청이 성공했거나 원문·삭제 상태가 바뀌면 덮어쓰지 않는다.
+        values = _notice_values(result)
+        analysis_fields = (
+            "title",
+            "summary",
+            "deadline_at",
+            "deadline_source_text",
+            "processing_status",
+            "retry_count",
+            "last_error",
+            "next_retry_at",
+        )
+        statement = (
+            update(NoticeModel)
+            .where(
+                NoticeModel.workspace_id == original.workspace_id,
+                NoticeModel.canonical_url == original.canonical_url,
+                NoticeModel.channel_id == original.channel_id,
+                NoticeModel.message_ts == original.message_ts,
+                NoticeModel.source_text == original.text,
+                NoticeModel.posted_at == original.posted_at,
+                NoticeModel.processing_status == "processing_failed",
+                NoticeModel.deleted_at.is_(None),
+                NoticeModel.last_error == original.last_error,
+                NoticeModel.retry_count == original.retry_count,
+            )
+            .values(**{field: values[field] for field in analysis_fields})
+            .returning(NoticeModel.id)
+        )
+        with self._session_factory() as session:
+            updated_id = session.execute(statement).scalar_one_or_none()
+            session.commit()
+            return updated_id is not None
 
 
 def _notice_values(notice: Notice) -> dict[str, object]:

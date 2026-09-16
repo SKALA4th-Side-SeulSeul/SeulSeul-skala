@@ -1,6 +1,8 @@
 """설정 채널의 메시지에서 링크별 공지를 안전하게 수집하는지 확인한다."""
 
 import logging
+from argparse import Namespace
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from unittest.mock import MagicMock
@@ -8,13 +10,19 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import CheckConstraint, UniqueConstraint
+from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, select
+from sqlalchemy.orm import sessionmaker
 
 from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
+from seulseul.config import AiSettings, ConfigError, DatabaseSettings, SlackSettings
+from seulseul.database import Base
 from seulseul.notices.model import Notice, NoticeModel
-from seulseul.notices.repository import SqlAlchemyNoticeRepository
+from seulseul.notices.repository import InMemoryNoticeRepository, SqlAlchemyNoticeRepository
+from seulseul.notices.retry import main as retry_main
+from seulseul.notices.retry import run_command
 from seulseul.notices.service import (
+    NoticeRetryError,
     NoticeService,
     canonicalize_url,
     extract_notice_urls,
@@ -343,3 +351,392 @@ def test_sqlalchemy_repository_restores_domain_notice() -> None:
     assert notices[0].analysis is not None
     assert notices[0].analysis.title == "과제 제출"
     assert notices[0].text == "9월 20일까지 제출"
+
+
+def failed_notice(**overrides: Any) -> Notice:
+    notice = Notice(
+        workspace_id=WORKSPACE_ID,
+        channel_id=ALLOWED_CHANNEL,
+        message_ts=MESSAGE_TS,
+        text="개인정보 포함 원문 9월 20일까지 제출",
+        original_url="https://forms.example.test/task?source=slack",
+        canonical_url="https://forms.example.test/task",
+        source_permalink=PERMALINK,
+        posted_at=datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL),
+        processing_status="processing_failed",
+        retry_count=2,
+        last_error="이전 연결 오류",
+        next_retry_at=datetime(2026, 9, 15, 9, 0, tzinfo=SEOUL),
+    )
+    return replace(notice, **overrides)
+
+
+def test_successful_new_notice_wakes_worker_once_after_storage() -> None:
+    changes = []
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        analyzer=FakeAnalyzer(),
+        on_change=lambda: changes.append(service.recent_notices(5)),
+    )
+    record(service)
+    record(service)
+    assert len(changes) == 1
+    assert changes[0][0].processing_status == "processed"
+
+
+def test_retry_success_wakes_worker_without_changing_link_identity() -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    changed = MagicMock()
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=FakeAnalyzer(), repository=repository, on_change=changed
+    )
+    service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+    changed.assert_called_once_with()
+    assert repository.recent(5)[0].canonical_url == original.canonical_url
+
+
+def test_retry_updates_existing_notice_and_preserves_original_input() -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
+
+    result = service.retry_failed_notice(WORKSPACE_ID, original.canonical_url + "/#section")
+
+    assert result.processing_status == "processed"
+    assert result.analysis is not None
+    assert result.last_error is None
+    assert result.next_retry_at is None
+    assert result.retry_count == 0
+    assert analyzer.calls == [(original.text, original.original_url, original.posted_at)]
+    assert service.recent_notices(10) == [result]
+    assert service.failed_notices(10) == []
+    assert record(service) == []
+    with pytest.raises(NoticeRetryError, match="실패한 공지만"):
+        service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+    assert len(analyzer.calls) == 1
+
+
+def test_retry_failure_updates_error_but_preserves_previous_analysis() -> None:
+    repository = InMemoryNoticeRepository(10)
+    previous_analysis = FakeAnalyzer().analyze("원문", "링크", failed_notice().posted_at)
+    original = failed_notice(analysis=previous_analysis)
+    repository.add(original)
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        analyzer=FakeAnalyzer(AiClientError("새 오류", retry_count=1)),
+        repository=repository,
+    )
+
+    result = service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+
+    assert result.processing_status == "processing_failed"
+    assert result.last_error == "새 오류"
+    assert result.retry_count == 1
+    assert result.analysis == previous_analysis
+    assert result.next_retry_at is None
+    assert service.recent_notices(10) == [result]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"deleted_at": datetime(2026, 9, 16, tzinfo=SEOUL)},
+        {"processing_status": "processed"},
+        {"processing_status": "ai_disabled"},
+        {"workspace_id": "TOTHER"},
+        {"channel_id": "COTHER"},
+    ],
+)
+def test_retry_rejects_ineligible_notice_without_ai_call(overrides: dict[str, Any]) -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice(**overrides)
+    repository.add(original)
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
+
+    with pytest.raises(NoticeRetryError):
+        service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+
+    assert analyzer.calls == []
+    assert repository.get(original.workspace_id, original.canonical_url) == original
+
+
+def test_retry_with_ai_disabled_leaves_failure_unchanged() -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
+
+    with pytest.raises(NoticeRetryError, match="AI_PROVIDER"):
+        service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+    assert service.failed_notices(10) == [original]
+
+
+@pytest.mark.parametrize("url", ["not-a-url", "https://[", "ftp://forms.example.test/task"])
+def test_retry_rejects_invalid_url(url: str) -> None:
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=FakeAnalyzer())
+    with pytest.raises(NoticeRetryError, match="제출 링크"):
+        service.retry_failed_notice(WORKSPACE_ID, url)
+
+
+def test_failed_list_filters_before_applying_limit() -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    repository.add(failed_notice(workspace_id="TOTHER"))
+    repository.add(
+        failed_notice(
+            canonical_url="https://forms.example.test/processed", processing_status="processed"
+        )
+    )
+    repository.add(
+        failed_notice(
+            canonical_url="https://forms.example.test/deleted", deleted_at=original.posted_at
+        )
+    )
+    repository.add(
+        failed_notice(canonical_url="https://forms.example.test/channel", channel_id="COTHER")
+    )
+    service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
+
+    assert service.failed_notices(1, workspace_id=WORKSPACE_ID) == [original]
+    with pytest.raises(ValueError, match="1 이상"):
+        service.failed_notices(0)
+
+
+def test_retry_does_not_overwrite_a_concurrent_change() -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    concurrent = replace(original, processing_status="processed")
+    analyzer = MagicMock()
+
+    def analyze(*args: Any) -> NoticeAnalysis:
+        assert repository.replace_failed(original, concurrent)
+        raise AiClientError("늦게 도착한 실패")
+
+    analyzer.analyze.side_effect = analyze
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
+    with pytest.raises(NoticeRetryError, match="상태가 변경"):
+        service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+    assert service.recent_notices(10) == [concurrent]
+
+
+def test_sqlalchemy_retry_updates_same_row_and_rejects_stale_failure() -> None:
+    # DB 저장·조회·조건부 UPDATE는 격리된 메모리 DB로 검증한다. 실제 API/DB는 쓰지 않는다.
+    engine = create_engine("sqlite://")
+    try:
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(bind=engine)
+        with factory() as session:
+            original = failed_notice()
+            model = NoticeModel(
+                workspace_id=original.workspace_id,
+                channel_id=original.channel_id,
+                message_ts=original.message_ts,
+                source_text=original.text,
+                original_url=original.original_url,
+                canonical_url=original.canonical_url,
+                source_permalink=original.source_permalink,
+                posted_at=original.posted_at,
+                processing_status=original.processing_status,
+                retry_count=original.retry_count,
+                last_error=original.last_error,
+                next_retry_at=original.next_retry_at,
+            )
+            session.add(model)
+            session.commit()
+            notice_id = model.id
+        repository = SqlAlchemyNoticeRepository(factory)
+        stored = repository.get(WORKSPACE_ID, original.canonical_url)
+        assert stored is not None
+        assert repository.get("TOTHER", original.canonical_url) is None
+        assert repository.failed(5, {ALLOWED_CHANNEL}, WORKSPACE_ID) == [stored]
+        assert repository.failed(5, {"COTHER"}, WORKSPACE_ID) == []
+        assert repository.failed(5, {ALLOWED_CHANNEL}, "TOTHER") == []
+        processed = replace(
+            stored,
+            processing_status="processed",
+            last_error=None,
+            retry_count=0,
+            next_retry_at=None,
+            analysis=FakeAnalyzer().analyze(stored.text, stored.original_url, stored.posted_at),
+        )
+
+        assert repository.replace_failed(stored, processed)
+        assert not repository.replace_failed(stored, replace(stored, last_error="늦은 오류"))
+        assert repository.failed(5, {ALLOWED_CHANNEL}) == []
+        restored = repository.get(WORKSPACE_ID, original.canonical_url)
+        assert restored is not None and restored.processing_status == "processed"
+        assert restored.analysis is not None and restored.analysis.title == "과제 제출"
+        assert restored.last_error is None and restored.next_retry_at is None
+        with factory() as session:
+            assert session.execute(select(NoticeModel.id)).scalars().all() == [notice_id]
+    finally:
+        engine.dispose()
+
+
+def test_sqlalchemy_retry_update_is_scoped_and_preserves_source() -> None:
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.execute.return_value.scalar_one_or_none.return_value = uuid4()
+    repository = SqlAlchemyNoticeRepository(lambda: session)
+    original = failed_notice()
+
+    assert repository.replace_failed(original, replace(original, last_error="새 오류"))
+
+    statement = session.execute.call_args.args[0]
+    sql = str(statement)
+    where = sql.split(" WHERE ")[1]
+    for column in (
+        "workspace_id",
+        "canonical_url",
+        "channel_id",
+        "message_ts",
+        "source_text",
+        "posted_at",
+        "processing_status",
+        "deleted_at",
+        "last_error",
+        "retry_count",
+    ):
+        assert f"notices.{column}" in where
+    assigned = sql.split(" SET ")[1].split(" WHERE ")[0]
+    assigned_columns = {assignment.split("=")[0] for assignment in assigned.split(", ")}
+    assert "source_text" not in assigned_columns
+    assert "canonical_url" not in assigned_columns
+    assert statement.compile().params["last_error"] == "새 오류"
+    session.commit.assert_called_once_with()
+
+
+def test_retry_cli_list_prints_command_without_calling_ai_or_exposing_source(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice(last_error="상태 코드: 500, 응답: 비공개 원문 nvapi-secret")
+    repository.add(original)
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
+
+    assert run_command(service, Namespace(action="list", workspace_id=None, limit=20)) == 0
+    output = capsys.readouterr().out
+    assert "seulseul.notices.retry retry" in output
+    assert WORKSPACE_ID in output and original.original_url in output
+    assert "상태 코드: 500" in output
+    assert "비공개 원문" not in output and "nvapi-secret" not in output
+    assert original.text not in output
+    assert analyzer.calls == []
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_retry_cli_reports_result_and_exit_code(
+    failure: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        repository=repository,
+        analyzer=FakeAnalyzer(AiClientError("연결 오류") if failure else None),
+    )
+    exit_code = run_command(
+        service, Namespace(action="retry", workspace_id=WORKSPACE_ID, url=original.original_url)
+    )
+    assert exit_code == int(failure)
+    assert ("재처리 실패" if failure else "재처리 성공") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("limit", ["0", "101", "wrong"])
+def test_retry_cli_rejects_invalid_limit_before_loading_settings(limit: str) -> None:
+    with pytest.raises(SystemExit) as error:
+        retry_main(["list", "--limit", limit])
+    assert error.value.code == 2
+
+
+def test_retry_missing_notice_never_calls_ai() -> None:
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer)
+    with pytest.raises(NoticeRetryError, match="찾을 수 없습니다"):
+        service.retry_failed_notice(WORKSPACE_ID, "https://forms.example.test/missing")
+    assert analyzer.calls == []
+
+
+@pytest.mark.parametrize("mode", ["list", "retry", "disabled", "config_error"])
+def test_retry_cli_wires_dependencies_and_closes_resources(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prefix = "seulseul.notices.retry."
+    engine = MagicMock()
+    client = MagicMock()
+    client_constructor = MagicMock(return_value=client)
+    service = MagicMock()
+    service.failed_notices.return_value = []
+    service.retry_failed_notice.return_value = failed_notice(processing_status="processed")
+    service_constructor = MagicMock(return_value=service)
+    monkeypatch.setattr(
+        prefix + "load_slack_settings",
+        lambda: SlackSettings(
+            bot_token="xoxb-test",
+            app_token="xapp-test",
+            notice_channels=(ALLOWED_CHANNEL,),
+        ),
+    )
+    monkeypatch.setattr(prefix + "load_database_settings", lambda: DatabaseSettings("unused"))
+    monkeypatch.setattr(prefix + "create_database_engine", lambda settings: engine)
+    monkeypatch.setattr(prefix + "create_session_factory", MagicMock())
+    monkeypatch.setattr(prefix + "SqlAlchemyNoticeRepository", MagicMock())
+    monkeypatch.setattr(prefix + "OpenAICompatibleChatClient", client_constructor)
+    monkeypatch.setattr(prefix + "NoticeService", service_constructor)
+    settings_loader = MagicMock(
+        return_value=AiSettings(
+            provider="ollama",
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+            model="llama3.2",
+            timeout_seconds=45,
+        )
+    )
+    if mode == "disabled":
+        settings_loader.return_value = None
+    elif mode == "config_error":
+        settings_loader.side_effect = ConfigError("NVIDIA_MODEL이 비어 있습니다.")
+    monkeypatch.setattr(prefix + "load_ai_settings", settings_loader)
+
+    args = (
+        ["list"]
+        if mode == "list"
+        else [
+            "retry",
+            "--workspace-id",
+            WORKSPACE_ID,
+            "--url",
+            failed_notice().original_url,
+        ]
+    )
+    assert retry_main(args) == (1 if mode in {"disabled", "config_error"} else 0)
+
+    engine.dispose.assert_called_once_with()
+    if mode == "list":
+        settings_loader.assert_not_called()
+        client_constructor.assert_not_called()
+        service.retry_failed_notice.assert_not_called()
+        assert "실패 공지가 없습니다" in capsys.readouterr().out
+    elif mode == "retry":
+        client.close.assert_called_once_with()
+        assert client_constructor.call_args.kwargs["disable_thinking"] is False
+        service.retry_failed_notice.assert_called_once_with(
+            WORKSPACE_ID,
+            failed_notice().original_url,
+        )
+    else:
+        client_constructor.assert_not_called()
+        service_constructor.assert_not_called()
+        assert "설정" in capsys.readouterr().out or mode == "config_error"
