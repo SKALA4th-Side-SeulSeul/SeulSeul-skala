@@ -9,10 +9,10 @@ from sqlalchemy import CheckConstraint, UniqueConstraint
 from seulseul.users.model import Student, StudentModel
 from seulseul.users.repository import InMemoryStudentRepository, SqlAlchemyStudentRepository
 from seulseul.users.service import (
-    InvalidStudentDisplayNameError,
+    InvalidStudentRealNameError,
     StudentAffiliation,
     StudentService,
-    parse_student_display_name,
+    parse_student_real_name,
 )
 
 WORKSPACE_ID = "T0000000001"
@@ -40,15 +40,15 @@ def test_student_model_has_workspace_user_identity_and_affiliation() -> None:
 
 
 @pytest.mark.parametrize("class_number", range(1, 5))
-def test_parse_student_display_name_accepts_classes_one_to_four(class_number: int) -> None:
-    assert parse_student_display_name(f"4기_광주_{class_number}반_홍길동") == StudentAffiliation(
+def test_parse_student_real_name_accepts_classes_one_to_four(class_number: int) -> None:
+    assert parse_student_real_name(f"4기_광주_{class_number}반_홍길동") == StudentAffiliation(
         class_number=class_number,
         student_name="홍길동",
     )
 
 
 @pytest.mark.parametrize(
-    "display_name",
+    "real_name",
     [
         "광주_3반_홍길동",
         "3기_광주_3반_홍길동",
@@ -59,9 +59,9 @@ def test_parse_student_display_name_accepts_classes_one_to_four(class_number: in
         "4기_광주_3반_   ",
     ],
 )
-def test_parse_student_display_name_rejects_invalid_format(display_name: str) -> None:
-    with pytest.raises(InvalidStudentDisplayNameError, match="4기_광주"):
-        parse_student_display_name(display_name)
+def test_parse_student_real_name_rejects_invalid_format(real_name: str) -> None:
+    with pytest.raises(InvalidStudentRealNameError, match="Slack 성명.*4기_광주"):
+        parse_student_real_name(real_name)
 
 
 def test_student_service_enrolls_and_updates_same_slack_user() -> None:
@@ -73,6 +73,7 @@ def test_student_service_enrolls_and_updates_same_slack_user() -> None:
 
     assert first.class_number == 1
     assert updated.class_number == 4
+    assert updated.real_name == "4기_광주_4반_홍길동"
     assert repository.get(WORKSPACE_ID, USER_ID) == updated
 
 
@@ -93,7 +94,7 @@ def test_sqlalchemy_student_repository_upserts_student() -> None:
     student = Student(
         workspace_id=WORKSPACE_ID,
         slack_user_id=USER_ID,
-        display_name="4기_광주_3반_홍길동",
+        real_name="4기_광주_3반_홍길동",
         campus="광주",
         class_number=3,
     )
@@ -104,6 +105,7 @@ def test_sqlalchemy_student_repository_upserts_student() -> None:
     parameters = statement.compile().params
     assert parameters["workspace_id"] == WORKSPACE_ID
     assert parameters["class_number"] == 3
+    assert parameters["display_name"] == student.real_name
     session.commit.assert_called_once_with()
 
 

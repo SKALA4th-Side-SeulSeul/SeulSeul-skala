@@ -18,11 +18,11 @@ from seulseul.slack.client import (
 from seulseul.slack.views import (
     build_command_help_text,
     build_enrollment_success_text,
-    build_invalid_display_name_text,
+    build_invalid_real_name_text,
     build_recent_notices_text,
     build_withdrawal_text,
 )
-from seulseul.users.service import InvalidStudentDisplayNameError, StudentService
+from seulseul.users.service import InvalidStudentRealNameError, StudentService
 
 SEULSEUL_COMMAND = "/seulseul"
 START_ACTION = "시작"
@@ -83,17 +83,17 @@ def _enroll_student(
     responder: SlackCommandResponder,
 ) -> None:
     try:
-        display_name = profile_provider.get_display_name(user_id)
+        real_name = profile_provider.get_real_name(user_id)
     except UserProfileError:
         responder.send(
-            f"<@{user_id}> Slack 표시 이름을 확인하지 못했습니다. "
+            f"<@{user_id}> Slack 성명을 확인하지 못했습니다. "
             "앱의 `users:read` 권한과 프로필 설정을 확인해 주세요."
         )
         return
     try:
-        student = student_service.enroll(workspace_id, user_id, display_name)
-    except InvalidStudentDisplayNameError:
-        responder.send(build_invalid_display_name_text(user_id))
+        student = student_service.enroll(workspace_id, user_id, real_name)
+    except InvalidStudentRealNameError:
+        responder.send(build_invalid_real_name_text(user_id))
         return
     responder.send(build_enrollment_success_text(user_id, student))
 

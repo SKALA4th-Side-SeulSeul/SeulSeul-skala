@@ -30,7 +30,7 @@ class Student:
 
     workspace_id: str
     slack_user_id: str
-    display_name: str
+    real_name: str
     campus: str
     class_number: int
 
@@ -52,7 +52,8 @@ class StudentModel(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     workspace_id: Mapped[str] = mapped_column(String(32), nullable=False)
     slack_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 기존 DB 컬럼 이름은 유지하며, 값은 Slack profile.real_name으로 갱신한다.
+    real_name: Mapped[str] = mapped_column("display_name", String(100), nullable=False)
     campus: Mapped[str] = mapped_column(String(32), nullable=False)
     class_number: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

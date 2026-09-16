@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 from seulseul.notices.model import Notice
 from seulseul.users.model import Student
-from seulseul.users.service import DISPLAY_NAME_GUIDE
+from seulseul.users.service import REAL_NAME_GUIDE
 
 
 def build_recent_notices_text(user_id: str, notices: Sequence[Notice]) -> str:
@@ -34,10 +34,10 @@ def build_enrollment_success_text(user_id: str, student: Student) -> str:
     return f"<@{user_id}> SeulSeul 가입이 완료되었습니다. 소속: 광주 {student.class_number}반"
 
 
-def build_invalid_display_name_text(user_id: str) -> str:
+def build_invalid_real_name_text(user_id: str) -> str:
     return (
-        f"<@{user_id}> 가입하려면 Slack 표시 이름을 "
-        f"`{DISPLAY_NAME_GUIDE}` 형식으로 설정해 주세요. 예: `4기_광주_3반_홍길동`"
+        f"<@{user_id}> 가입하려면 Slack 성명을 "
+        f"`{REAL_NAME_GUIDE}` 형식으로 설정해 주세요. 예: `4기_광주_3반_홍길동`"
     )
 
 

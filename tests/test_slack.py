@@ -52,17 +52,17 @@ class RecordingAck:
 
 
 class FakeUserProfileProvider:
-    def __init__(self, display_name: str) -> None:
-        self.display_name = display_name
+    def __init__(self, real_name: str) -> None:
+        self.real_name = real_name
         self.calls: list[str] = []
 
-    def get_display_name(self, user_id: str) -> str:
+    def get_real_name(self, user_id: str) -> str:
         self.calls.append(user_id)
-        return self.display_name
+        return self.real_name
 
 
 class FailingUserProfileProvider:
-    def get_display_name(self, user_id: str) -> str:
+    def get_real_name(self, user_id: str) -> str:
         raise UserProfileError("조회 실패")
 
 
@@ -135,13 +135,13 @@ def notice(status: ProcessingStatus = "processed") -> Notice:
 
 
 def create_command_handler(
-    display_name: str = "4기_광주_3반_홍길동",
+    real_name: str = "4기_광주_3반_홍길동",
 ) -> tuple[Any, InMemoryStudentRepository]:
     repository = InMemoryStudentRepository()
     handler = create_seulseul_command_handler(
         NoticeService({CHANNEL_ID}),
         StudentService(repository),
-        FakeUserProfileProvider(display_name),
+        FakeUserProfileProvider(real_name),
     )
     return handler, repository
 
@@ -157,10 +157,10 @@ def test_command_responder_sends_only_to_command_user() -> None:
 
 
 @pytest.mark.parametrize(
-    ("action", "display_name", "workspace_id", "expected_text"),
+    ("action", "real_name", "workspace_id", "expected_text"),
     [
         ("시작", "4기_광주_3반_홍길동", WORKSPACE_ID, "가입이 완료"),
-        ("시작", "광주_3반_홍길동", WORKSPACE_ID, "표시 이름"),
+        ("시작", "광주_3반_홍길동", WORKSPACE_ID, "성명"),
         ("해지", "4기_광주_3반_홍길동", WORKSPACE_ID, "가입된 정보가 없습니다"),
         ("", "4기_광주_3반_홍길동", WORKSPACE_ID, "처리된 공지가 없습니다"),
         ("공지", "4기_광주_3반_홍길동", WORKSPACE_ID, "처리된 공지가 없습니다"),
@@ -171,14 +171,14 @@ def test_command_responder_sends_only_to_command_user() -> None:
 def test_command_routes_delegate_responses_to_client(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
-    display_name: str,
+    real_name: str,
     workspace_id: str,
     expected_text: str,
 ) -> None:
     send = Mock()
     monkeypatch.setattr(SlackCommandResponder, "send", send)
     respond = Mock(side_effect=AssertionError("핸들러에서 respond를 직접 호출하면 안 됩니다."))
-    handler, _ = create_command_handler(display_name)
+    handler, _ = create_command_handler(real_name)
 
     handler(
         RecordingAck(),
@@ -196,7 +196,7 @@ def test_start_command_acknowledges_before_profile_lookup_and_response() -> None
     steps: list[str] = []
     repository = InMemoryStudentRepository()
 
-    def get_display_name(user_id: str) -> str:
+    def get_real_name(user_id: str) -> str:
         assert steps == ["ack"]
         steps.append("profile")
         return "4기_광주_3반_홍길동"
@@ -208,7 +208,7 @@ def test_start_command_acknowledges_before_profile_lookup_and_response() -> None
     handler = create_seulseul_command_handler(
         NoticeService({CHANNEL_ID}),
         StudentService(repository),
-        Mock(get_display_name=get_display_name),
+        Mock(get_real_name=get_real_name),
     )
 
     handler(
@@ -246,7 +246,7 @@ def test_start_command_enrolls_student_after_profile_lookup() -> None:
     assert "가입이 완료" in respond.calls[0][0][0]
 
 
-def test_start_command_guides_invalid_display_name() -> None:
+def test_start_command_guides_invalid_real_name() -> None:
     respond = RecordingAck()
     handler, repository = create_command_handler("광주_3반_홍길동")
 
@@ -259,6 +259,7 @@ def test_start_command_guides_invalid_display_name() -> None:
 
     assert repository.get(WORKSPACE_ID, USER_ID) is None
     assert "4기_광주_<1~4>반_<이름>" in respond.calls[0][0][0]
+    assert "Slack 성명" in respond.calls[0][0][0]
 
 
 def test_start_command_guides_profile_lookup_failure() -> None:
@@ -356,13 +357,61 @@ def test_slack_web_client_rejects_response_without_permalink() -> None:
         raise AssertionError("MessagePermalinkError가 발생해야 합니다.")
 
 
-def test_slack_web_client_returns_profile_display_name() -> None:
-    client = FakeSlackWebClient({"user": {"profile": {"display_name": "4기_광주_2반_홍길동"}}})
+def test_slack_web_client_returns_profile_real_name() -> None:
+    client = FakeSlackWebClient(
+        {"user": {"profile": {"real_name": " 4기_광주_2반_홍길동 ", "display_name": "길동"}}}
+    )
 
-    display_name = SlackWebApiClient(client).get_display_name(USER_ID)
+    real_name = SlackWebApiClient(client).get_real_name(USER_ID)
 
-    assert display_name == "4기_광주_2반_홍길동"
+    assert real_name == "4기_광주_2반_홍길동"
     assert client.user_calls == [{"user": USER_ID}]
+
+
+@pytest.mark.parametrize("real_name", [None, "", "   ", 123])
+def test_slack_web_client_rejects_missing_real_name_even_with_valid_display_name(
+    real_name: Any,
+) -> None:
+    client = FakeSlackWebClient(
+        {"user": {"profile": {"real_name": real_name, "display_name": "4기_광주_2반_홍길동"}}}
+    )
+
+    with pytest.raises(UserProfileError, match="성명이 설정되어 있지 않습니다"):
+        SlackWebApiClient(client).get_real_name(USER_ID)
+
+
+@pytest.mark.parametrize(
+    ("real_name", "display_name", "expected_class"),
+    [
+        ("4기_광주_2반_홍길동", "길동", 2),
+        ("4기_광주_2반_홍길동", "4기_광주_4반_홍길동", 2),
+        ("홍길동", "4기_광주_4반_홍길동", None),
+        ("", "4기_광주_4반_홍길동", None),
+    ],
+)
+def test_start_command_enrolls_using_real_name_only(
+    real_name: str, display_name: str, expected_class: int | None
+) -> None:
+    repository = InMemoryStudentRepository()
+    client = FakeSlackWebClient(
+        {"user": {"profile": {"real_name": real_name, "display_name": display_name}}}
+    )
+    handler = create_seulseul_command_handler(
+        NoticeService({CHANNEL_ID}), StudentService(repository), SlackWebApiClient(client)
+    )
+    respond = RecordingAck()
+
+    handler(RecordingAck(), respond, {**COMMAND, "text": "시작"}, logging.getLogger("test"))
+
+    student = repository.get(WORKSPACE_ID, USER_ID)
+    if expected_class is None:
+        assert student is None
+        assert "성명" in respond.calls[0][0][0]
+    else:
+        assert student is not None
+        assert student.class_number == expected_class
+        assert student.real_name == real_name
+        assert "가입이 완료" in respond.calls[0][0][0]
 
 
 def test_view_never_exposes_original_message_text() -> None:

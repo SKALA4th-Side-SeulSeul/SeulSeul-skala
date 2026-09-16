@@ -24,6 +24,8 @@ docker compose up -d postgres
 
 Slack 앱 설정은 `slack-manifest.yaml`을 기준으로 맞춥니다. `users:read` 같은 OAuth scope를 새로 적용했다면 워크스페이스에 앱을 다시 설치한 뒤 갱신된 Bot Token을 `.env`에 반영합니다.
 
+가입 시 Slack 프로필의 **성명**을 `4기_광주_<1~4>반_<이름>` 형식으로 설정하고 `/seulseul 시작`을 실행합니다. 소속은 성명(`profile.real_name`)으로 판별하며, 표시 이름은 자유롭게 사용할 수 있습니다. 기존 가입자도 같은 명령으로 성명과 반을 갱신할 수 있습니다.
+
 운영 서버에서는 `compose.prod.yaml`을 사용합니다. 운영 절차와 보안 기준은 `docs/DB-TODO.md`를 따릅니다.
 
 ## 검증
