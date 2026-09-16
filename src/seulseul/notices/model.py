@@ -40,7 +40,10 @@ class Notice:
     posted_at: datetime
     processing_status: ProcessingStatus
     analysis: NoticeAnalysis | None = None
+    retry_count: int = 0
     last_error: str | None = None
+    next_retry_at: datetime | None = None
+    deleted_at: datetime | None = None
 
 
 class NoticeModel(Base):

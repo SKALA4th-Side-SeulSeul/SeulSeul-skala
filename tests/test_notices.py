@@ -3,6 +3,8 @@
 import logging
 from datetime import datetime
 from typing import Any
+from unittest.mock import MagicMock
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -11,6 +13,7 @@ from sqlalchemy import CheckConstraint, UniqueConstraint
 from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
 from seulseul.notices.model import Notice, NoticeModel
+from seulseul.notices.repository import SqlAlchemyNoticeRepository
 from seulseul.notices.service import (
     NoticeService,
     canonicalize_url,
@@ -53,6 +56,26 @@ class FakeAnalyzer:
             deadline_at=datetime(2026, 9, 20, 23, 59, tzinfo=SEOUL),
             deadline_source_text="9월 20일까지",
         )
+
+
+class FakeNoticeRepository:
+    def __init__(self) -> None:
+        self.notices: list[Notice] = []
+
+    def contains(self, workspace_id: str, canonical_url: str) -> bool:
+        return any(
+            notice.workspace_id == workspace_id and notice.canonical_url == canonical_url
+            for notice in self.notices
+        )
+
+    def add(self, notice: Notice) -> bool:
+        if self.contains(notice.workspace_id, notice.canonical_url):
+            return False
+        self.notices.append(notice)
+        return True
+
+    def recent(self, limit: int) -> list[Notice]:
+        return list(reversed(self.notices))[:limit]
 
 
 def record(service: NoticeService, event: dict[str, Any] | None = None) -> list[Notice]:
@@ -155,6 +178,16 @@ def test_canonical_duplicate_link_is_ignored() -> None:
     assert len(service.recent_notices(5)) == 1
 
 
+def test_repository_keeps_duplicate_detection_across_service_instances() -> None:
+    repository = FakeNoticeRepository()
+    first_service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
+    restarted_service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
+
+    assert len(record(first_service)) == 1
+    assert record(restarted_service, channel_message(ts="1789344001.000100")) == []
+    assert len(repository.notices) == 1
+
+
 def test_ai_failure_is_classified_without_logging_notice_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -169,6 +202,18 @@ def test_ai_failure_is_classified_without_logging_notice_text(
     assert notices[0].analysis is None
     assert notices[0].last_error == "AI 서버 오류"
     assert "홍길동" not in caplog.text
+
+
+def test_ai_retry_count_is_passed_to_repository() -> None:
+    repository = FakeNoticeRepository()
+    analyzer = FakeAnalyzer(AiClientError("AI 서버 오류", retry_count=2))
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
+
+    record(service)
+
+    assert repository.notices[0].processing_status == "processing_failed"
+    assert repository.notices[0].retry_count == 2
+    assert repository.notices[0].last_error == "AI 서버 오류"
 
 
 def test_recent_notices_are_newest_first_and_bounded() -> None:
@@ -220,3 +265,63 @@ def test_notice_model_enforces_link_identity_and_tracks_ai_failures() -> None:
     assert "uq_notices_workspace_canonical_url" in unique_constraints
     assert "uq_notices_source_link" in unique_constraints
     assert "ck_notices_processing_status" in check_constraints
+
+
+def test_sqlalchemy_repository_writes_notice_with_analysis() -> None:
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.execute.return_value.scalar_one_or_none.return_value = uuid4()
+    repository = SqlAlchemyNoticeRepository(lambda: session)
+    stored_notice = Notice(
+        workspace_id=WORKSPACE_ID,
+        channel_id=ALLOWED_CHANNEL,
+        message_ts=MESSAGE_TS,
+        text="9월 20일까지 제출",
+        original_url="https://forms.example.test/task",
+        canonical_url="https://forms.example.test/task",
+        source_permalink=PERMALINK,
+        posted_at=datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL),
+        processing_status="processed",
+        analysis=FakeAnalyzer().analyze(
+            "9월 20일까지 제출",
+            "https://forms.example.test/task",
+            datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL),
+        ),
+    )
+
+    assert repository.add(stored_notice)
+    statement = session.execute.call_args.args[0]
+    parameters = statement.compile().params
+    assert parameters["title"] == "과제 제출"
+    assert parameters["deadline_source_text"] == "9월 20일까지"
+    assert parameters["processing_status"] == "processed"
+    session.commit.assert_called_once_with()
+
+
+def test_sqlalchemy_repository_restores_domain_notice() -> None:
+    model = NoticeModel(
+        workspace_id=WORKSPACE_ID,
+        channel_id=ALLOWED_CHANNEL,
+        message_ts=MESSAGE_TS,
+        source_text="9월 20일까지 제출",
+        original_url="https://forms.example.test/task",
+        canonical_url="https://forms.example.test/task",
+        source_permalink=PERMALINK,
+        posted_at=datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL),
+        title="과제 제출",
+        summary="과제를 제출합니다.",
+        deadline_at=datetime(2026, 9, 20, 23, 59, tzinfo=SEOUL),
+        deadline_source_text="9월 20일까지",
+        processing_status="processed",
+        retry_count=0,
+    )
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.execute.return_value.scalars.return_value.all.return_value = [model]
+    repository = SqlAlchemyNoticeRepository(lambda: session)
+
+    notices = repository.recent(5)
+
+    assert notices[0].analysis is not None
+    assert notices[0].analysis.title == "과제 제출"
+    assert notices[0].text == "9월 20일까지 제출"

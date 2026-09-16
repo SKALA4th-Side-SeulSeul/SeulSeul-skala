@@ -2,8 +2,6 @@
 
 import logging
 import re
-import threading
-from collections import deque
 from collections.abc import Collection, Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -13,6 +11,7 @@ from zoneinfo import ZoneInfo
 from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
 from seulseul.notices.model import Notice
+from seulseul.notices.repository import InMemoryNoticeRepository, NoticeRepository
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +87,7 @@ class NoticeService:
         allowed_channel_ids: Collection[str],
         max_stored_notices: int = DEFAULT_MAX_STORED_NOTICES,
         analyzer: NoticeAnalyzerProtocol | None = None,
+        repository: NoticeRepository | None = None,
     ) -> None:
         if not allowed_channel_ids:
             raise ValueError("공지 채널 ID를 하나 이상 설정해야 합니다.")
@@ -96,10 +96,8 @@ class NoticeService:
                 f"max_stored_notices는 1 이상이어야 합니다. 전달된 값: {max_stored_notices}"
             )
         self._allowed_channel_ids = frozenset(allowed_channel_ids)
-        self._notices: deque[Notice] = deque(maxlen=max_stored_notices)
-        self._canonical_urls: set[str] = set()
         self._analyzer = analyzer
-        self._lock = threading.Lock()
+        self._repository = repository or InMemoryNoticeRepository(max_stored_notices)
 
     def accepts_message(
         self,
@@ -135,10 +133,8 @@ class NoticeService:
         created: list[Notice] = []
 
         for original_url, canonical_url in extract_notice_urls(text):
-            with self._lock:
-                if canonical_url in self._canonical_urls:
-                    continue
-                self._canonical_urls.add(canonical_url)
+            if self._repository.contains(workspace_id, canonical_url):
+                continue
 
             notice = self._build_notice(
                 workspace_id=workspace_id,
@@ -150,15 +146,14 @@ class NoticeService:
                 source_permalink=source_permalink,
                 posted_at=posted_at,
             )
-            self._store_notice(notice)
-            created.append(notice)
+            if self._repository.add(notice):
+                created.append(notice)
         return created
 
     def recent_notices(self, limit: int) -> list[Notice]:
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
-        with self._lock:
-            return list(self._notices)[:limit]
+        return self._repository.recent(limit)
 
     def _build_notice(
         self,
@@ -204,6 +199,7 @@ class NoticeService:
                 source_permalink=source_permalink,
                 posted_at=posted_at,
                 processing_status="processing_failed",
+                retry_count=error.retry_count,
                 last_error=str(error),
             )
         return Notice(
@@ -218,10 +214,3 @@ class NoticeService:
             processing_status="processed",
             analysis=analysis,
         )
-
-    def _store_notice(self, notice: Notice) -> None:
-        with self._lock:
-            if len(self._notices) == self._notices.maxlen:
-                removed = self._notices[-1]
-                self._canonical_urls.discard(removed.canonical_url)
-            self._notices.appendleft(notice)

@@ -81,6 +81,7 @@ class NoticeAnalyzer:
                 raw_output = self._client.complete(ANALYSIS_SYSTEM_PROMPT, user_prompt)
                 return parse_notice_analysis(raw_output, notice_text, posted_at)
             except AiClientError as error:
+                error.retry_count = attempt
                 last_error = error
                 if not error.retryable:
                     raise

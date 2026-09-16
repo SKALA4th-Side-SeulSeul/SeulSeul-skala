@@ -157,12 +157,25 @@ def test_analyzer_obeys_retry_after() -> None:
 def test_analyzer_does_not_retry_non_retryable_error() -> None:
     client = SequenceChatClient([AiClientError("unauthorized", retryable=False)])
 
-    with pytest.raises(AiClientError, match="unauthorized"):
+    with pytest.raises(AiClientError, match="unauthorized") as error:
         NoticeAnalyzer(client, sleeper=lambda seconds: None).analyze(
             "9월 20일까지 제출", "https://forms.example.test/task", POSTED_AT
         )
 
     assert len(client.calls) == 1
+    assert error.value.retry_count == 0
+
+
+def test_analyzer_reports_retry_count_after_final_failure() -> None:
+    client = SequenceChatClient(["not-json", "still-not-json", "also-not-json"])
+
+    with pytest.raises(AiClientError) as error:
+        NoticeAnalyzer(client, sleeper=lambda seconds: None).analyze(
+            "9월 20일까지 제출", "https://forms.example.test/task", POSTED_AT
+        )
+
+    assert len(client.calls) == 3
+    assert error.value.retry_count == 2
 
 
 def test_analyzer_rejects_oversized_notice_without_truncating_or_calling_ai() -> None:

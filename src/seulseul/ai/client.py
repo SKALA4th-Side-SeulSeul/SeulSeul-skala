@@ -22,11 +22,17 @@ class AiClientError(Exception):
     """AI 호출이 실패했거나 응답 형식이 예상과 다를 때 발생한다."""
 
     def __init__(
-        self, message: str, *, retryable: bool = True, retry_after_seconds: float | None = None
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        retry_after_seconds: float | None = None,
+        retry_count: int = 0,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
+        self.retry_count = retry_count
 
 
 class ChatClient(Protocol):
