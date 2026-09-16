@@ -57,6 +57,7 @@ tests/test_<domain>.py  # 도메인별 테스트
 - 코드 경계: `docs/ARCHITECTURE.md`
 - 제품 흐름과 용어: `docs/PRODUCT.md`
 - 현재 작업: `docs/PLANS.md`
+- 로컬·서버(Docker, PostgreSQL, Oracle Cloud) 작업: `docs/TODO.md`
 
 ## 완료 기준
 
