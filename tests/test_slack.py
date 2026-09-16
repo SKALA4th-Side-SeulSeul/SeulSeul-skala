@@ -1,30 +1,41 @@
 """Slack 핸들러와 사용자 응답을 실제 Slack API 없이 검증한다."""
 
+import json
 import logging
-from datetime import datetime
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from typing import Any
 from unittest.mock import Mock
-from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 import pytest
 from slack_bolt import App
+from slack_sdk.errors import SlackApiError
+from slack_sdk.web import SlackResponse
 
-from seulseul.ai.model import NoticeAnalysis
-from seulseul.notices.model import Notice, ProcessingStatus
+from seulseul.checklists.model import (
+    ChecklistActionError,
+    ChecklistDeliveryError,
+    ChecklistItem,
+    DailyChecklistBoard,
+)
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import (
     MessagePermalinkError,
+    SlackChecklistClient,
     SlackCommandResponder,
     SlackWebApiClient,
     UserProfileError,
 )
 from seulseul.slack.handlers import (
     SEULSEUL_COMMAND,
+    create_checklist_action_handler,
     create_message_event_handler,
     create_seulseul_command_handler,
+    register_checklist_handlers,
     register_handlers,
 )
-from seulseul.slack.views import build_recent_notices_text
+from seulseul.slack.views import build_daily_checklist_message
 from seulseul.users.repository import InMemoryStudentRepository
 from seulseul.users.service import StudentService
 
@@ -40,7 +51,6 @@ COMMAND = {
     "user_id": USER_ID,
     "channel_id": "D1",
 }
-SEOUL = ZoneInfo("Asia/Seoul")
 
 
 class RecordingAck:
@@ -108,38 +118,11 @@ def channel_message(**overrides: Any) -> dict[str, Any]:
     return event
 
 
-def notice(status: ProcessingStatus = "processed") -> Notice:
-    analysis = (
-        NoticeAnalysis(
-            title="과제 제출",
-            summary="폼으로 과제를 제출합니다.",
-            deadline_at=datetime(2026, 9, 20, 23, 59, tzinfo=SEOUL),
-            deadline_source_text="9월 20일까지",
-        )
-        if status == "processed"
-        else None
-    )
-    return Notice(
-        workspace_id=WORKSPACE_ID,
-        channel_id=CHANNEL_ID,
-        message_ts=MESSAGE_TS,
-        text="외부에 보여 주면 안 되는 원문",
-        original_url="https://forms.example.test/task",
-        canonical_url="https://forms.example.test/task",
-        source_permalink=PERMALINK,
-        posted_at=datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL),
-        processing_status=status,
-        analysis=analysis,
-        last_error="실패" if status == "processing_failed" else None,
-    )
-
-
 def create_command_handler(
     real_name: str = "4기_광주_3반_홍길동",
 ) -> tuple[Any, InMemoryStudentRepository]:
     repository = InMemoryStudentRepository()
     handler = create_seulseul_command_handler(
-        NoticeService({CHANNEL_ID}),
         StudentService(repository),
         FakeUserProfileProvider(real_name),
     )
@@ -162,8 +145,9 @@ def test_command_responder_sends_only_to_command_user() -> None:
         ("시작", "4기_광주_3반_홍길동", WORKSPACE_ID, "가입이 완료"),
         ("시작", "광주_3반_홍길동", WORKSPACE_ID, "성명"),
         ("해지", "4기_광주_3반_홍길동", WORKSPACE_ID, "가입된 정보가 없습니다"),
-        ("", "4기_광주_3반_홍길동", WORKSPACE_ID, "처리된 공지가 없습니다"),
-        ("공지", "4기_광주_3반_홍길동", WORKSPACE_ID, "처리된 공지가 없습니다"),
+        ("", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
+        ("공지", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
+        ("체크리스트", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
         ("도움말", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
         ("시작", "4기_광주_3반_홍길동", "", "워크스페이스 또는 사용자"),
     ],
@@ -206,7 +190,6 @@ def test_start_command_acknowledges_before_profile_lookup_and_response() -> None
         steps.append("response")
 
     handler = create_seulseul_command_handler(
-        NoticeService({CHANNEL_ID}),
         StudentService(repository),
         Mock(get_real_name=get_real_name),
     )
@@ -221,7 +204,7 @@ def test_start_command_acknowledges_before_profile_lookup_and_response() -> None
     assert steps == ["ack", "profile", "response"]
 
 
-def test_command_acks_with_empty_guide_when_no_notices() -> None:
+def test_bare_command_acks_and_shows_only_start_withdraw_and_dm_guide() -> None:
     ack = RecordingAck()
     respond = RecordingAck()
     handler, _ = create_command_handler()
@@ -229,7 +212,9 @@ def test_command_acks_with_empty_guide_when_no_notices() -> None:
     handler(ack, respond, COMMAND, logging.getLogger("test"))
 
     assert ack.calls == [((), {})]
-    assert respond.calls[0][0][0] == f"<@{USER_ID}> 아직 처리된 공지가 없습니다."
+    assert "/seulseul 시작" in respond.calls[0][0][0]
+    assert "/seulseul 해지" in respond.calls[0][0][0]
+    assert "/seulseul 공지" not in respond.calls[0][0][0]
 
 
 def test_start_command_enrolls_student_after_profile_lookup() -> None:
@@ -265,7 +250,6 @@ def test_start_command_guides_invalid_real_name() -> None:
 def test_start_command_guides_profile_lookup_failure() -> None:
     respond = RecordingAck()
     handler = create_seulseul_command_handler(
-        NoticeService({CHANNEL_ID}),
         StudentService(InMemoryStudentRepository()),
         FailingUserProfileProvider(),
     )
@@ -396,9 +380,7 @@ def test_start_command_enrolls_using_real_name_only(
     client = FakeSlackWebClient(
         {"user": {"profile": {"real_name": real_name, "display_name": display_name}}}
     )
-    handler = create_seulseul_command_handler(
-        NoticeService({CHANNEL_ID}), StudentService(repository), SlackWebApiClient(client)
-    )
+    handler = create_seulseul_command_handler(StudentService(repository), SlackWebApiClient(client))
     respond = RecordingAck()
 
     handler(RecordingAck(), respond, {**COMMAND, "text": "시작"}, logging.getLogger("test"))
@@ -414,22 +396,6 @@ def test_start_command_enrolls_using_real_name_only(
         assert "가입이 완료" in respond.calls[0][0][0]
 
 
-def test_view_never_exposes_original_message_text() -> None:
-    text = build_recent_notices_text("U0000000001", [notice()])
-
-    assert "외부에 보여 주면 안 되는 원문" not in text
-    assert "폼으로 과제를 제출합니다." in text
-    assert f"<{PERMALINK}|Slack 원문 보기>" in text
-
-
-def test_failed_analysis_shows_only_status_and_source_link() -> None:
-    text = build_recent_notices_text("U0000000001", [notice("processing_failed")])
-
-    assert "AI 분석 실패" in text
-    assert "외부에 보여 주면 안 되는 원문" not in text
-    assert PERMALINK in text
-
-
 def test_slash_command_name_is_fixed() -> None:
     assert SEULSEUL_COMMAND == "/seulseul"
 
@@ -442,3 +408,169 @@ def test_register_handlers_accepts_socket_mode_app() -> None:
         NoticeService({CHANNEL_ID}),
         StudentService(InMemoryStudentRepository()),
     )
+
+
+def daily_board():
+    return DailyChecklistBoard(
+        id=uuid4(),
+        message_date=date(2026, 9, 16),
+        items=(
+            ChecklistItem(
+                uuid4(),
+                "과제 <@everyone>",
+                "요약",
+                datetime(2026, 9, 20, tzinfo=timezone.utc),
+                "https://forms.example.test/task",
+                PERMALINK,
+                False,
+            ),
+        ),
+        pending_count=1,
+        completed_count=0,
+        show_completed=False,
+        page=0,
+        page_count=1,
+        refreshed_at=datetime(2026, 9, 16, tzinfo=timezone.utc),
+    )
+
+
+def test_daily_view_has_links_explicit_buttons_and_plain_text_summary() -> None:
+    board = daily_board()
+    payload = build_daily_checklist_message(board)
+    section = next(block for block in payload["blocks"] if block.get("accessory"))
+    assert section["text"]["type"] == "plain_text"
+    assert section["accessory"]["action_id"] == "checklist_complete"
+    value = json.loads(section["accessory"]["value"])
+    assert value == {"daily": str(board.id), "item": str(board.items[0].id)}
+    assert PERMALINK in str(payload)
+    assert "https://forms.example.test/task" in str(payload)
+    assert len(payload["blocks"]) < 50
+    completed = replace(
+        board,
+        items=(replace(board.items[0], completed=True),),
+        show_completed=True,
+        pending_count=0,
+        completed_count=1,
+    )
+    assert "checklist_undo" in str(build_daily_checklist_message(completed))
+
+
+def test_daily_client_posts_regular_dm_and_updates_by_saved_address() -> None:
+    client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "DTEST"}}
+    client.chat_postMessage.return_value = {"ts": "123.456"}
+    adapter = SlackChecklistClient(client)
+    board = daily_board()
+
+    assert adapter.send(USER_ID, board) == ("DTEST", "123.456")
+    client.conversations_open.assert_called_once_with(users=USER_ID)
+    args = client.chat_postMessage.call_args.kwargs
+    assert args["channel"] == "DTEST" and "response_type" not in args
+    assert args["metadata"]["event_payload"]["delivery_id"] == str(board.id)
+    adapter.update("DTEST", "123.456", board)
+    assert client.chat_update.call_args.kwargs["ts"] == "123.456"
+    assert client.chat_update.call_args.kwargs["channel"] == "DTEST"
+    client.chat_postEphemeral.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("stage", "uncertain"), [("conversations_open", False), ("chat_postMessage", True)]
+)
+def test_daily_client_classifies_connection_failure(stage, uncertain):
+    client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "DTEST"}}
+    getattr(client, stage).side_effect = OSError("secret transport detail")
+    with pytest.raises(ChecklistDeliveryError) as caught:
+        SlackChecklistClient(client).send(USER_ID, daily_board())
+    assert caught.value.uncertain is uncertain
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "uncertain"),
+    [
+        (429, "ratelimited", False),
+        (200, "missing_scope", False),
+        (500, "internal_error", True),
+        (200, "request_timeout", True),
+    ],
+)
+def test_daily_client_classifies_slack_errors(status, code, uncertain):
+    response = SlackResponse(
+        client=Mock(),
+        http_verb="POST",
+        api_url="https://slack.com/api/test",
+        req_args={},
+        data={"ok": False, "error": code},
+        headers={"Retry-After": "2"},
+        status_code=status,
+    )
+    client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "DTEST"}}
+    client.chat_postMessage.side_effect = SlackApiError("secret detail", response)
+    with pytest.raises(ChecklistDeliveryError) as caught:
+        SlackChecklistClient(client).send(USER_ID, daily_board())
+    assert caught.value.code == code
+    assert caught.value.uncertain is uncertain
+    assert caught.value.retry_after == 2
+    assert "secret" not in str(caught.value)
+
+
+def test_daily_client_disables_sdk_transport_retries_without_making_requests() -> None:
+    adapter = SlackChecklistClient.from_token("xoxb-fake")
+    assert adapter._client.retry_handlers == []
+    assert adapter._client.timeout == 10
+
+
+def action_body():
+    return {
+        "team": {"id": WORKSPACE_ID},
+        "user": {"id": USER_ID},
+        "container": {"channel_id": "DTEST", "message_ts": "123.456"},
+        "actions": [{"action_id": "checklist_complete", "value": "{}"}],
+    }
+
+
+def test_checklist_handler_acknowledges_before_delegating():
+    calls = []
+    service = Mock()
+
+    def handle(*args):
+        assert calls == ["ack"]
+        calls.append("service")
+        return True
+
+    service.handle_action.side_effect = handle
+    handler = create_checklist_action_handler(service)
+    respond = Mock()
+    handler(lambda: calls.append("ack"), respond, action_body(), logging.getLogger("test"))
+    assert calls == ["ack", "service"]
+    respond.assert_not_called()
+    service.handle_action.assert_called_once_with(
+        WORKSPACE_ID,
+        USER_ID,
+        "DTEST",
+        "123.456",
+        "complete",
+        "{}",
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ChecklistActionError("최신 메시지를 이용해 주세요."), RuntimeError("sensitive DB details")],
+)
+def test_checklist_handler_reports_errors_only_through_responder(error):
+    service = Mock()
+    service.handle_action.side_effect = error
+    respond = RecordingAck()
+    create_checklist_action_handler(service)(
+        RecordingAck(), respond, action_body(), logging.getLogger("test")
+    )
+    assert respond.calls[0][1]["response_type"] == "ephemeral"
+    assert "sensitive" not in str(respond.calls)
+
+
+def test_checklist_action_listener_registers_without_live_api():
+    app = App(token="xoxb-test-token", token_verification_enabled=False)
+    register_checklist_handlers(app, Mock())

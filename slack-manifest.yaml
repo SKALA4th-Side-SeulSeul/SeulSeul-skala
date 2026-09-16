@@ -13,8 +13,8 @@ features:
     always_online: true
   slash_commands:
     - command: /seulseul
-      description: SeulSeul 가입·해지와 최근 공지를 관리합니다.
-      usage_hint: 시작 | 해지 | 공지
+      description: 매일 오전 9시 개인 체크리스트 알림을 시작하거나 해지합니다.
+      usage_hint: 시작 | 해지
       should_escape: false
 
 oauth_config:
@@ -24,6 +24,8 @@ oauth_config:
       - commands
       - groups:history
       - users:read
+      - chat:write
+      - im:write
 
 settings:
   event_subscriptions:

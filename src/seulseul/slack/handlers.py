@@ -1,11 +1,14 @@
 """Slack 명령어와 이벤트를 서비스에 넘기고 응답을 구성하는 핸들러."""
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from slack_bolt import App
 
+from seulseul.checklists.model import ChecklistActionError
+from seulseul.checklists.service import DailyChecklistService
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import (
     MessagePermalinkError,
@@ -19,7 +22,6 @@ from seulseul.slack.views import (
     build_command_help_text,
     build_enrollment_success_text,
     build_invalid_real_name_text,
-    build_recent_notices_text,
     build_withdrawal_text,
 )
 from seulseul.users.service import InvalidStudentRealNameError, StudentService
@@ -27,12 +29,9 @@ from seulseul.users.service import InvalidStudentRealNameError, StudentService
 SEULSEUL_COMMAND = "/seulseul"
 START_ACTION = "시작"
 WITHDRAW_ACTION = "해지"
-NOTICE_ACTIONS = frozenset({"", "공지"})
-RECENT_NOTICES_LIMIT = 5
 
 
 def create_seulseul_command_handler(
-    notice_service: NoticeService,
     student_service: StudentService,
     profile_provider: UserProfileProvider,
 ) -> Callable[..., None]:
@@ -57,12 +56,6 @@ def create_seulseul_command_handler(
         elif action == WITHDRAW_ACTION:
             deleted = student_service.withdraw(workspace_id, user_id)
             responder.send(build_withdrawal_text(user_id, deleted))
-        elif action in NOTICE_ACTIONS:
-            notices = notice_service.recent_notices(
-                RECENT_NOTICES_LIMIT,
-                workspace_id=workspace_id,
-            )
-            responder.send(build_recent_notices_text(user_id, notices))
         else:
             responder.send(build_command_help_text(user_id))
         logger.info(
@@ -165,6 +158,45 @@ def register_handlers(
 ) -> None:
     permalink_provider = SlackWebApiClient(app.client)
     app.command(SEULSEUL_COMMAND)(
-        create_seulseul_command_handler(notice_service, student_service, permalink_provider)
+        create_seulseul_command_handler(student_service, permalink_provider)
     )
     app.event("message")(create_message_event_handler(notice_service, permalink_provider))
+
+
+def create_checklist_action_handler(service: DailyChecklistService) -> Callable[..., None]:
+    def handle_checklist_action(
+        ack: Callable[..., None],
+        respond: Callable[..., None],
+        body: dict[str, Any],
+        logger: logging.Logger,
+    ) -> None:
+        ack()
+        responder = SlackCommandResponder(respond)
+        try:
+            action = body["actions"][0]
+            operation = str(action["action_id"]).removeprefix("checklist_")
+            updated = service.handle_action(
+                str(body["team"]["id"]),
+                str(body["user"]["id"]),
+                str(body["container"]["channel_id"]),
+                str(body["container"]["message_ts"]),
+                operation,
+                str(action["value"]),
+            )
+            if not updated:
+                responder.send("변경은 저장했습니다. DM 갱신을 기다리거나 새로고침을 눌러 주세요.")
+        except (KeyError, IndexError, TypeError):
+            responder.send("버튼 정보를 확인할 수 없습니다. 최신 체크리스트를 이용해 주세요.")
+        except ChecklistActionError as error:
+            responder.send(str(error))
+        except Exception as error:
+            logger.error("체크리스트 동작 오류: type=%s", type(error).__name__)
+            responder.send("처리 결과를 확인하지 못했습니다. 잠시 후 새로고침해 주세요.")
+
+    return handle_checklist_action
+
+
+def register_checklist_handlers(app: App, service: DailyChecklistService) -> None:
+    app.action(re.compile(r"^checklist_(complete|undo|pending|completed|previous|next|refresh)$"))(
+        create_checklist_action_handler(service)
+    )

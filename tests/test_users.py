@@ -117,3 +117,14 @@ def test_sqlalchemy_student_repository_reports_deleted_student() -> None:
 
     assert repository.delete(WORKSPACE_ID, USER_ID)
     session.commit.assert_called_once_with()
+
+
+def test_student_changes_notify_worker_after_persistence() -> None:
+    repository = InMemoryStudentRepository()
+    observed = []
+    service = StudentService(
+        repository, on_change=lambda: observed.append(repository.get(WORKSPACE_ID, USER_ID))
+    )
+    service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_홍길동")
+    service.withdraw(WORKSPACE_ID, USER_ID)
+    assert observed[0] is not None and observed[1] is None

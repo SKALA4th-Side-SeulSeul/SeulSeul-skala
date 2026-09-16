@@ -59,6 +59,32 @@ class DatabaseSettings:
     url: str
 
 
+def load_notice_targets(
+    notice_channels: tuple[str, ...], environ: Mapping[str, str] | None = None
+) -> dict[str, int | None]:
+    """공지 채널별 광주 전체(None) 또는 반 번호를 명시적으로 읽는다."""
+    environ = _resolve_environ(environ)
+    raw = _read(environ, "SLACK_NOTICE_TARGETS")
+    targets: dict[str, int | None] = {}
+    for entry in raw.split(","):
+        channel, separator, target = entry.strip().partition("=")
+        channel, target = channel.strip(), target.strip()
+        if (
+            not separator
+            or channel in targets
+            or channel not in notice_channels
+            or target not in {"all", "1", "2", "3", "4"}
+        ):
+            raise ConfigError(
+                "SLACK_NOTICE_TARGETS에 각 공지 채널을 채널ID=all 또는 채널ID=1~4로 "
+                "쉼표로 구분해 입력하세요. 중복·미등록 채널은 허용하지 않습니다."
+            )
+        targets[channel] = None if target == "all" else int(target)
+    if set(targets) != set(notice_channels):
+        raise ConfigError("SLACK_NOTICE_TARGETS에 SLACK_NOTICE_CHANNELS의 모든 채널이 필요합니다.")
+    return targets
+
+
 def load_slack_settings(environ: Mapping[str, str] | None = None) -> SlackSettings:
     """Slack 연결 설정을 읽는다.
 
