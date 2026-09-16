@@ -26,6 +26,8 @@ from seulseul.database import create_database_engine, create_session_factory
 from seulseul.notices.repository import NoticeRepository, SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeService
 from seulseul.slack.handlers import register_handlers
+from seulseul.users.repository import SqlAlchemyStudentRepository
+from seulseul.users.service import StudentService
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +62,14 @@ def create_notice_service(
     )
 
 
-def create_app(settings: SlackSettings, notice_service: NoticeService) -> App:
+def create_app(
+    settings: SlackSettings,
+    notice_service: NoticeService,
+    student_service: StudentService,
+) -> App:
     # App을 만들 때 Bolt가 auth.test로 Bot 토큰을 검증하므로 네트워크 연결이 필요하다.
     app = App(token=settings.bot_token)
-    register_handlers(app, notice_service)
+    register_handlers(app, notice_service, student_service)
     return app
 
 
@@ -83,12 +89,14 @@ def main() -> None:
     engine = create_database_engine(database_settings)
     session_factory = create_session_factory(engine)
     notice_repository = SqlAlchemyNoticeRepository(session_factory)
+    student_repository = SqlAlchemyStudentRepository(session_factory)
     notice_service = create_notice_service(
         ai_settings,
         slack_settings.notice_channels,
         notice_repository,
     )
-    app = create_app(slack_settings, notice_service)
+    student_service = StudentService(student_repository)
+    app = create_app(slack_settings, notice_service, student_service)
     logger.info(
         "Socket Mode로 Slack에 연결합니다. 공지 채널 설정 %d개",
         len(slack_settings.notice_channels),

@@ -150,10 +150,10 @@ class NoticeService:
                 created.append(notice)
         return created
 
-    def recent_notices(self, limit: int) -> list[Notice]:
+    def recent_notices(self, limit: int, *, workspace_id: str | None = None) -> list[Notice]:
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
-        return self._repository.recent(limit)
+        return self._repository.recent(limit, workspace_id)
 
     def _build_notice(
         self,

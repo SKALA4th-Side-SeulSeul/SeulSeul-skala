@@ -28,7 +28,7 @@ tests/test_<domain>.py  # 도메인별 테스트
 ## 절대 금지
 
 - `config.py` 밖에서 `os.getenv()`, `os.environ` 사용 (Ruff `TID251`이 차단)
-- `slack/client.py`, `ai/client.py` 밖에서 외부 API 호출
+- `slack/client.py`, `ai/client.py` 밖에서 외부 API 호출 (명령 응답 `respond()` 포함)
 - Slack 핸들러·뷰에서 DB 직접 조작
 - 테스트에서 실제 Slack·AI(NVIDIA·Ollama) API 호출
 - `.env`, 토큰, 실제 사용자 정보 커밋

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -21,6 +22,17 @@ from seulseul.database import Base
 
 if TYPE_CHECKING:
     from seulseul.checklists.model import ChecklistModel
+
+
+@dataclass(frozen=True)
+class Student:
+    """가입한 Slack 학생의 식별자와 소속."""
+
+    workspace_id: str
+    slack_user_id: str
+    display_name: str
+    campus: str
+    class_number: int
 
 
 class StudentModel(Base):

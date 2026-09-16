@@ -1,7 +1,6 @@
 """Slack 명령어와 이벤트를 서비스에 넘기고 응답을 구성하는 핸들러."""
 
 import logging
-import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -11,30 +10,92 @@ from seulseul.notices.service import NoticeService
 from seulseul.slack.client import (
     MessagePermalinkError,
     MessagePermalinkProvider,
+    SlackCommandResponder,
     SlackWebApiClient,
+    UserProfileError,
+    UserProfileProvider,
 )
-from seulseul.slack.views import build_recent_notices_text
+from seulseul.slack.views import (
+    build_command_help_text,
+    build_enrollment_success_text,
+    build_invalid_display_name_text,
+    build_recent_notices_text,
+    build_withdrawal_text,
+)
+from seulseul.users.service import InvalidStudentDisplayNameError, StudentService
 
-ANY_SLASH_COMMAND = re.compile(r"^/.+")
+SEULSEUL_COMMAND = "/seulseul"
+START_ACTION = "시작"
+WITHDRAW_ACTION = "해지"
+NOTICE_ACTIONS = frozenset({"", "공지"})
 RECENT_NOTICES_LIMIT = 5
 
 
-def create_recent_notices_command_handler(
+def create_seulseul_command_handler(
     notice_service: NoticeService,
+    student_service: StudentService,
+    profile_provider: UserProfileProvider,
 ) -> Callable[..., None]:
-    def handle_recent_notices_command(
-        ack: Callable[..., None], command: dict[str, Any], logger: logging.Logger
+    def handle_seulseul_command(
+        ack: Callable[..., None],
+        respond: Callable[..., None],
+        command: dict[str, Any],
+        logger: logging.Logger,
     ) -> None:
-        notices = notice_service.recent_notices(RECENT_NOTICES_LIMIT)
-        ack(build_recent_notices_text(command["user_id"], notices))
+        ack()
+        responder = SlackCommandResponder(respond)
+        action = str(command.get("text") or "").strip()
+        workspace_id = str(command.get("team_id") or "")
+        user_id = str(command.get("user_id") or "")
+        if not workspace_id or not user_id:
+            responder.send("워크스페이스 또는 사용자 정보를 확인할 수 없습니다.")
+            logger.warning("명령어 식별자 누락: action=%s", action)
+            return
+
+        if action == START_ACTION:
+            _enroll_student(student_service, profile_provider, workspace_id, user_id, responder)
+        elif action == WITHDRAW_ACTION:
+            deleted = student_service.withdraw(workspace_id, user_id)
+            responder.send(build_withdrawal_text(user_id, deleted))
+        elif action in NOTICE_ACTIONS:
+            notices = notice_service.recent_notices(
+                RECENT_NOTICES_LIMIT,
+                workspace_id=workspace_id,
+            )
+            responder.send(build_recent_notices_text(user_id, notices))
+        else:
+            responder.send(build_command_help_text(user_id))
         logger.info(
-            "명령어 수신: command=%s channel=%s notices=%d",
+            "명령어 처리: command=%s action=%s channel=%s",
             command.get("command"),
+            action,
             command.get("channel_id"),
-            len(notices),
         )
 
-    return handle_recent_notices_command
+    return handle_seulseul_command
+
+
+def _enroll_student(
+    student_service: StudentService,
+    profile_provider: UserProfileProvider,
+    workspace_id: str,
+    user_id: str,
+    responder: SlackCommandResponder,
+) -> None:
+    try:
+        display_name = profile_provider.get_display_name(user_id)
+    except UserProfileError:
+        responder.send(
+            f"<@{user_id}> Slack 표시 이름을 확인하지 못했습니다. "
+            "앱의 `users:read` 권한과 프로필 설정을 확인해 주세요."
+        )
+        return
+    try:
+        student = student_service.enroll(workspace_id, user_id, display_name)
+    except InvalidStudentDisplayNameError:
+        responder.send(build_invalid_display_name_text(user_id))
+        return
+    responder.send(build_enrollment_success_text(user_id, student))
 
 
 def create_message_event_handler(
@@ -97,7 +158,13 @@ def create_message_event_handler(
     return handle_message_event
 
 
-def register_handlers(app: App, notice_service: NoticeService) -> None:
-    app.command(ANY_SLASH_COMMAND)(create_recent_notices_command_handler(notice_service))
+def register_handlers(
+    app: App,
+    notice_service: NoticeService,
+    student_service: StudentService,
+) -> None:
     permalink_provider = SlackWebApiClient(app.client)
+    app.command(SEULSEUL_COMMAND)(
+        create_seulseul_command_handler(notice_service, student_service, permalink_provider)
+    )
     app.event("message")(create_message_event_handler(notice_service, permalink_provider))
