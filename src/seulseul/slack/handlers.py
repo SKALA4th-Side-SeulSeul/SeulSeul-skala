@@ -18,12 +18,6 @@ from seulseul.slack.client import (
     UserProfileError,
     UserProfileProvider,
 )
-from seulseul.slack.views import (
-    build_command_help_text,
-    build_enrollment_success_text,
-    build_invalid_real_name_text,
-    build_withdrawal_text,
-)
 from seulseul.users.service import InvalidStudentRealNameError, StudentService
 
 SEULSEUL_COMMAND = "/seulseul"
@@ -42,29 +36,26 @@ def create_seulseul_command_handler(
         logger: logging.Logger,
     ) -> None:
         ack()
-        responder = SlackCommandResponder(respond)
         action = str(command.get("text") or "").strip()
         workspace_id = str(command.get("team_id") or "")
         user_id = str(command.get("user_id") or "")
         if not workspace_id or not user_id:
-            responder.send("워크스페이스 또는 사용자 정보를 확인할 수 없습니다.")
             logger.warning("명령어 식별자 누락: action=%s", action)
             return
 
         try:
             if action == START_ACTION:
-                _enroll_student(student_service, profile_provider, workspace_id, user_id, responder)
+                _enroll_student(student_service, profile_provider, workspace_id, user_id, logger)
             elif action == WITHDRAW_ACTION:
-                deleted = student_service.withdraw(workspace_id, user_id)
-                responder.send(build_withdrawal_text(user_id, deleted))
+                student_service.withdraw(workspace_id, user_id)
             else:
-                responder.send(build_command_help_text(user_id))
+                logger.info("지원하지 않는 슬래시 명령 입력")
         except ChecklistDeliveryError as error:
-            logger.warning("명령 DM 정리 실패: code=%s", error.code)
-            responder.send(
-                "기존 봇 메시지 정리를 완료하지 못해 요청을 완료하지 않았습니다. "
-                "앱의 im:history 권한과 연결 상태를 확인한 뒤 같은 명령을 다시 실행해 주세요."
-            )
+            logger.warning("명령 DM 처리 실패: code=%s", error.code)
+            return
+        except Exception as error:
+            logger.error("슬래시 명령 처리 실패: type=%s", type(error).__name__)
+            return
         logger.info(
             "명령어 처리: command=%s action=%s channel=%s",
             command.get("command"),
@@ -80,22 +71,18 @@ def _enroll_student(
     profile_provider: UserProfileProvider,
     workspace_id: str,
     user_id: str,
-    responder: SlackCommandResponder,
+    logger: logging.Logger,
 ) -> None:
     try:
         real_name = profile_provider.get_real_name(user_id)
     except UserProfileError:
-        responder.send(
-            f"<@{user_id}> Slack 성명을 확인하지 못했습니다. "
-            "앱의 `users:read` 권한과 프로필 설정을 확인해 주세요."
-        )
+        logger.warning("가입 실패: Slack 성명 조회 실패; users:read 권한·프로필 확인 필요")
         return
     try:
-        student = student_service.enroll(workspace_id, user_id, real_name)
+        student_service.enroll(workspace_id, user_id, real_name)
     except InvalidStudentRealNameError:
-        responder.send(build_invalid_real_name_text(user_id))
+        logger.warning("가입 실패: Slack 성명 형식 불일치")
         return
-    responder.send(build_enrollment_success_text(user_id, student))
 
 
 def create_message_event_handler(

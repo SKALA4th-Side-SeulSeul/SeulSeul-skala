@@ -21,7 +21,7 @@ from seulseul.checklists.repository import SqlAlchemyChecklistRepository
 
 logger = logging.getLogger(__name__)
 # 문구·서식만 바뀌어도 기존 DM에 한 번 반영한다.
-BOARD_PRESENTATION_VERSION = 9
+BOARD_PRESENTATION_VERSION = 10
 
 
 class ChecklistMessenger(Protocol):

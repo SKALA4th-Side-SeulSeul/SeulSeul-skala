@@ -18,7 +18,7 @@
 - 외부 API 호출은 `slack/client.py`, `ai/client.py`에만 둡니다.
 - Slack 명령은 핸들러에서 먼저 `ack()`로 수신을 확인한 뒤 처리합니다. HTTP 요청을 보내는
   Bolt의 `respond` 콜백은 `slack/client.py`의 `SlackCommandResponder`에서만 호출하며,
-  응답은 명령 실행자에게만 보이는 `ephemeral`로 전송합니다.
+  슬래시 명령은 빈 `ack()`만 보내고 `respond()`를 호출하지 않습니다. 명령 오류는 민감정보 없이 로그에 남깁니다. 체크리스트 버튼의 오류 응답만 `ephemeral`로 전송합니다.
 - 업무 규칙은 도메인별 `service.py`가 담당합니다.
 - DB 모델은 도메인별 `model.py`에 두고, 연결은 `database.py`, 도메인별 DB 조작은
   `repository.py`가 관리합니다.
@@ -37,6 +37,8 @@
 - 환경변수는 `config.py`에서만 읽습니다. 다른 모듈의 `os.getenv()`, `os.environ` 사용은 Ruff(`TID251`)가 차단합니다.
 
 ## 요청 흐름
+
+해지 완료 안내는 학생 서비스가 삭제 후 주입된 콜백을 호출하고 `slack/client.py`가 `chat.postMessage` 일반 DM으로 보냅니다. 슬래시 명령의 `respond()`는 사용하지 않습니다.
 
 시작·해지의 메시지 정리(D-026)는 학생 서비스의 컨텍스트 콜백으로 체크리스트 서비스를 호출합니다. 단일 프로세스 공유 잠금이 명령 처리와 Slack 발송·버튼 처리를 직렬화합니다. 삭제 전 발송 기록을 `uncertain`/`dm_cleanup_pending`으로 커밋하고, Slack 클라이언트가 본인 DM의 봇 메시지를 모두 정리한 경우에만 발송 기록을 초기화합니다. 삭제 실패 시 같은 명령으로 재시도하며 완료 기록은 시작 시 보존합니다. 과거 메시지 자동 보존 정책은 일반 동기화에만 적용하고 명시적인 시작·해지는 예외입니다.
 
