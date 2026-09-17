@@ -49,6 +49,18 @@ def cleanup_client():
     return client
 
 
+@pytest.mark.parametrize("deleted", [True, False])
+def test_withdrawal_confirmation_is_normal_dm_not_ephemeral(deleted):
+    client = cleanup_client()
+    SlackChecklistClient(client).send_withdrawal("USTUDENT", deleted)
+    client.conversations_open.assert_called_once_with(users="USTUDENT")
+    client.chat_postEphemeral.assert_not_called()
+    payload = client.chat_postMessage.call_args.kwargs
+    assert payload["channel"] == "DTEST"
+    assert "response_type" not in payload
+    assert ("해지가 완료" if deleted else "가입되어 있지") in payload["text"]
+
+
 @pytest.mark.parametrize("code", ["message_not_found", "ratelimited"])
 def test_cleanup_ignores_already_deleted_but_propagates_rate_limit(code):
     client = cleanup_client()
@@ -143,7 +155,7 @@ def test_cleanup_failure_is_acknowledged_without_success_message(action):
         logging.getLogger(__name__),
     )
     ack.assert_called_once()
-    assert "완료하지 않았습니다" in respond.call_args.args[0]
+    respond.assert_not_called()
 
 
 CHANNEL_ID = "C0000000001"
@@ -247,24 +259,23 @@ def test_command_responder_sends_only_to_command_user() -> None:
 
 
 @pytest.mark.parametrize(
-    ("action", "real_name", "workspace_id", "expected_text"),
+    ("action", "real_name", "workspace_id"),
     [
-        ("시작", "4기_광주_3반_홍길동", WORKSPACE_ID, "가입이 완료"),
-        ("시작", "광주_3반_홍길동", WORKSPACE_ID, "성명"),
-        ("해지", "4기_광주_3반_홍길동", WORKSPACE_ID, "가입된 정보가 없습니다"),
-        ("", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
-        ("공지", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
-        ("체크리스트", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
-        ("도움말", "4기_광주_3반_홍길동", WORKSPACE_ID, "/seulseul 시작"),
-        ("시작", "4기_광주_3반_홍길동", "", "워크스페이스 또는 사용자"),
+        ("시작", "4기_광주_3반_홍길동", WORKSPACE_ID),
+        ("시작", "광주_3반_홍길동", WORKSPACE_ID),
+        ("해지", "4기_광주_3반_홍길동", WORKSPACE_ID),
+        ("", "4기_광주_3반_홍길동", WORKSPACE_ID),
+        ("공지", "4기_광주_3반_홍길동", WORKSPACE_ID),
+        ("체크리스트", "4기_광주_3반_홍길동", WORKSPACE_ID),
+        ("도움말", "4기_광주_3반_홍길동", WORKSPACE_ID),
+        ("시작", "4기_광주_3반_홍길동", ""),
     ],
 )
-def test_command_routes_delegate_responses_to_client(
+def test_command_routes_never_send_responses(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
     real_name: str,
     workspace_id: str,
-    expected_text: str,
 ) -> None:
     send = Mock()
     monkeypatch.setattr(SlackCommandResponder, "send", send)
@@ -278,8 +289,7 @@ def test_command_routes_delegate_responses_to_client(
         logging.getLogger("test"),
     )
 
-    send.assert_called_once()
-    assert expected_text in send.call_args.args[0]
+    send.assert_not_called()
     respond.assert_not_called()
 
 
@@ -308,10 +318,11 @@ def test_start_command_acknowledges_before_profile_lookup_and_response() -> None
         logging.getLogger("test"),
     )
 
-    assert steps == ["ack", "profile", "response"]
+    assert steps == ["ack", "profile"]
+    assert repository.get(WORKSPACE_ID, USER_ID) is not None
 
 
-def test_bare_command_acks_and_shows_only_start_withdraw_and_dm_guide() -> None:
+def test_bare_command_only_acks_without_message() -> None:
     ack = RecordingAck()
     respond = RecordingAck()
     handler, _ = create_command_handler()
@@ -319,9 +330,19 @@ def test_bare_command_acks_and_shows_only_start_withdraw_and_dm_guide() -> None:
     handler(ack, respond, COMMAND, logging.getLogger("test"))
 
     assert ack.calls == [((), {})]
-    assert "/seulseul 시작" in respond.calls[0][0][0]
-    assert "/seulseul 해지" in respond.calls[0][0][0]
-    assert "/seulseul 공지" not in respond.calls[0][0][0]
+    assert respond.calls == []
+
+
+def test_unexpected_command_failure_logs_type_without_responding_or_leaking_details(caplog):
+    service = Mock()
+    service.withdraw.side_effect = RuntimeError("sensitive token or user content")
+    handler = create_seulseul_command_handler(service, Mock())
+    ack, respond = Mock(), Mock()
+    handler(ack, respond, {**COMMAND, "text": "해지"}, logging.getLogger("test"))
+    ack.assert_called_once_with()
+    respond.assert_not_called()
+    assert "RuntimeError" in caplog.text
+    assert "sensitive" not in caplog.text
 
 
 def test_start_command_enrolls_student_after_profile_lookup() -> None:
@@ -335,7 +356,7 @@ def test_start_command_enrolls_student_after_profile_lookup() -> None:
     assert ack.calls == [((), {})]
     assert student is not None
     assert student.class_number == 3
-    assert "가입이 완료" in respond.calls[0][0][0]
+    assert respond.calls == []
 
 
 def test_start_command_guides_invalid_real_name() -> None:
@@ -350,8 +371,7 @@ def test_start_command_guides_invalid_real_name() -> None:
     )
 
     assert repository.get(WORKSPACE_ID, USER_ID) is None
-    assert "4기_광주_<1~4>반_<이름>" in respond.calls[0][0][0]
-    assert "Slack 성명" in respond.calls[0][0][0]
+    assert respond.calls == []
 
 
 def test_start_command_guides_profile_lookup_failure() -> None:
@@ -368,7 +388,7 @@ def test_start_command_guides_profile_lookup_failure() -> None:
         logging.getLogger("test"),
     )
 
-    assert "users:read" in respond.calls[0][0][0]
+    assert respond.calls == []
 
 
 def test_withdraw_command_deletes_student() -> None:
@@ -389,7 +409,7 @@ def test_withdraw_command_deletes_student() -> None:
     )
 
     assert repository.get(WORKSPACE_ID, USER_ID) is None
-    assert "개인 체크리스트가 삭제" in respond.calls[0][0][0]
+    assert respond.calls == []
 
 
 def test_message_handler_fetches_permalink_only_for_accepted_messages() -> None:
@@ -589,12 +609,12 @@ def test_start_command_enrolls_using_real_name_only(
     student = repository.get(WORKSPACE_ID, USER_ID)
     if expected_class is None:
         assert student is None
-        assert "성명" in respond.calls[0][0][0]
+        assert respond.calls == []
     else:
         assert student is not None
         assert student.class_number == expected_class
         assert student.real_name == real_name
-        assert "가입이 완료" in respond.calls[0][0][0]
+        assert respond.calls == []
 
 
 def test_slash_command_name_is_fixed() -> None:
@@ -675,7 +695,9 @@ def test_daily_view_groups_bold_titles_and_secondary_metadata_in_card(completed)
     card = blocks[0]
     assert card["type"] == "container"
     assert card["title"] == {"type": "plain_text", "text": "내 체크리스트"}
-    assert card["subtitle"]["text"] == ("완료 목록 · 1개" if completed else "미완료 목록 · 1개")
+    assert card["subtitle"]["text"] == (
+        ("완료 목록: 1개" if completed else "미완료 목록: 1개") + " · 마지막 갱신 09/16(수)"
+    )
     assert card["width"] == "full" and card["has_header_divider"]
     assert blocks[1]["type"] == "actions"
     assert [button["action_id"] for button in blocks[1]["elements"]] == [
@@ -707,7 +729,8 @@ def test_daily_view_groups_bold_titles_and_secondary_metadata_in_card(completed)
         else "완료로 표시" in body["accessory"]["accessibility_label"]
     )
     assert "요약" not in str(blocks) and "09월 16일" not in str(blocks)
-    assert "제출 후 ✓ · 마지막 갱신 09/16 09:00" in str(blocks[-1])
+    assert "제출 후" not in str(blocks)
+    assert "마지막 갱신" not in str(blocks[1:])
     assert "1/1" not in str(blocks[-1])
     assert "📅" not in str(blocks)
 
@@ -758,13 +781,34 @@ def test_daily_view_links_each_title_to_its_own_submission_and_preserves_url():
 def test_empty_daily_view_keeps_empty_state_and_shows_last_updated_in_seoul():
     board = replace(daily_board(), items=(), pending_count=0)
     payload = build_daily_checklist_message(board)
-    assert "마지막 갱신 09/16 09:00" in str(payload)
+    assert "마지막 갱신 09/16(수)" in str(payload)
     assert "마감 전 항목" not in str(payload)
     assert "현재 남은 할 일이 없어요." in str(payload)
     card = payload["blocks"][0]
     assert card["type"] == "container"
     assert len(card["child_blocks"]) == 1
     assert card["child_blocks"][0]["type"] == "section"
+
+
+@pytest.mark.parametrize("use_container", [True, False])
+@pytest.mark.parametrize(
+    "day,weekday",
+    [(14, "월"), (15, "화"), (16, "수"), (17, "목"), (18, "금"), (19, "토"), (20, "일")],
+)
+def test_updated_date_uses_korean_weekday_and_seoul_date(use_container, day, weekday):
+    board = replace(
+        daily_board(),
+        pending_count=4,
+        refreshed_at=datetime(2026, 9, day - 1, 15, 30, tzinfo=timezone.utc),
+        page_count=2,
+    )
+    payload = build_daily_checklist_message(board, use_container=use_container)
+    blocks = payload["blocks"]
+    hint = blocks[0]["subtitle"]["text"] if use_container else blocks[1]["elements"][0]["text"]
+    assert hint == f"미완료 목록: 4개 · 마지막 갱신 09/{day}({weekday})"
+    assert blocks[-1]["elements"] == [{"type": "plain_text", "text": "1/2"}]
+    assert "제출 후" not in str(payload)
+    assert "00:30" not in str(payload)
 
 
 @pytest.mark.parametrize(
@@ -793,7 +837,8 @@ def test_daily_view_identifies_filter_and_points_to_hidden_pending_notices(
     elif show_completed:
         board = replace(board, items=(replace(board.items[0], completed=True),))
     payload = build_daily_checklist_message(board)
-    hint = f"완료 목록 · {completed}개" if show_completed else f"미완료 목록 · {pending}개"
+    hint = f"완료 목록: {completed}개" if show_completed else f"미완료 목록: {pending}개"
+    hint += " · 마지막 갱신 09/16(수)"
     assert hint == payload["blocks"][0]["subtitle"]["text"]
     assert hint in payload["text"]
     assert all(block["type"] != "header" for block in payload["blocks"])
@@ -859,8 +904,8 @@ def test_card_fallback_keeps_all_rows_controls_and_secondary_information():
     fallback = build_daily_checklist_message(board, use_container=False)
     assert fallback["text"] == card_payload["text"]
     assert not any(block["type"] == "container" for block in fallback["blocks"])
-    assert fallback["blocks"][2:-2] == card_payload["blocks"][0]["child_blocks"]
-    assert fallback["blocks"][-2:] == card_payload["blocks"][1:]
+    assert fallback["blocks"][2:-1] == card_payload["blocks"][0]["child_blocks"]
+    assert fallback["blocks"][-1:] == card_payload["blocks"][1:]
     for block in fallback["blocks"]:
         parsed = Block.parse(block)
         assert parsed is not None
@@ -870,7 +915,7 @@ def test_card_fallback_keeps_all_rows_controls_and_secondary_information():
 def test_card_footer_only_shows_page_count_when_multiple_pages_exist():
     board = replace(daily_board(), page=1, page_count=3)
     blocks = build_daily_checklist_message(board)["blocks"]
-    assert blocks[-1]["elements"][0]["text"].startswith("2/3 · ")
+    assert blocks[-1]["elements"][0]["text"] == "2/3"
     navigation = blocks[-2]["elements"]
     assert [button["action_id"] for button in navigation] == [
         "checklist_previous",

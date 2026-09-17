@@ -7,8 +7,6 @@ from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from seulseul.checklists.model import DailyChecklistBoard
-from seulseul.users.model import Student
-from seulseul.users.service import REAL_NAME_GUIDE
 
 
 def build_daily_checklist_message(
@@ -19,10 +17,13 @@ def build_daily_checklist_message(
     heading = "내 체크리스트"
     counts = f"미완료 {board.pending_count}개 · 완료 {board.completed_count}개"
     view_hint = (
-        f"완료 목록 · {board.completed_count}개"
+        f"완료 목록: {board.completed_count}개"
         if board.show_completed
-        else f"미완료 목록 · {board.pending_count}개"
+        else f"미완료 목록: {board.pending_count}개"
     )
+    refreshed = board.refreshed_at.astimezone(seoul)
+    weekday = "월화수목금토일"[refreshed.weekday()]
+    view_hint += f" · 마지막 갱신 {refreshed:%m/%d}({weekday})"
     rows: list[dict[str, Any]] = []
 
     def button(label: str, operation: str, item_id: str | None = None) -> dict[str, Any]:
@@ -120,21 +121,15 @@ def build_daily_checklist_message(
         navigation.append(button("다음", "next"))
     if navigation:
         blocks.append({"type": "actions", "elements": navigation})
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "plain_text",
-                    "text": (
-                        f"{board.page + 1}/{board.page_count} · " if board.page_count > 1 else ""
-                    )
-                    + "제출 후 ✓ · "
-                    f"마지막 갱신 {board.refreshed_at.astimezone(seoul):%m/%d %H:%M}",
-                }
-            ],
-        }
-    )
+    if board.page_count > 1:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "plain_text", "text": f"{board.page + 1}/{board.page_count}"}
+                ],
+            }
+        )
     return {"text": f"{heading} — {counts}\n{view_hint}", "blocks": blocks}
 
 
@@ -166,30 +161,3 @@ def _link_icon(url: str) -> str:
     if "docs" in label:
         return "📄"
     return "🔗"
-
-
-def build_enrollment_success_text(user_id: str, student: Student) -> str:
-    return f"<@{user_id}> SeulSeul 가입이 완료되었습니다. 소속: 광주 {student.class_number}반"
-
-
-def build_invalid_real_name_text(user_id: str) -> str:
-    return (
-        f"<@{user_id}> 가입하려면 Slack 성명을 "
-        f"`{REAL_NAME_GUIDE}` 형식으로 설정해 주세요. 예: `4기_광주_3반_홍길동`"
-    )
-
-
-def build_withdrawal_text(user_id: str, deleted: bool) -> str:
-    if deleted:
-        return f"<@{user_id}> 알림이 해지되었고 개인 체크리스트가 삭제되었습니다."
-    return f"<@{user_id}> 현재 가입된 정보가 없습니다."
-
-
-def build_command_help_text(user_id: str) -> str:
-    return (
-        f"<@{user_id}> `/seulseul 시작`으로 가입하고, "
-        "`/seulseul 해지`로 알림을 해지할 수 있습니다. "
-        "시작·해지 시 기존 봇 DM을 정리합니다. 시작하면 완료 기록은 유지한 채 "
-        "새 체크리스트 하나를 보내고 같은 메시지를 계속 갱신합니다. "
-        "제출 후 ✓로 완료하고 ↶로 취소할 수 있습니다."
-    )

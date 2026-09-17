@@ -137,6 +137,24 @@ class SlackChecklistClient:
             raise ChecklistDeliveryError("invalid_workspace_response")
         return team_id
 
+    def send_withdrawal(self, user_id: str, deleted: bool) -> None:
+        """해지 처리 후 일반 DM으로 안내한다. 임시 응답과 자동 재전송은 사용하지 않는다."""
+        opened = self._call("conversations_open", users=user_id)
+        channel = opened.get("channel")
+        channel_id = channel.get("id") if isinstance(channel, Mapping) else None
+        if not isinstance(channel_id, str) or not channel_id.startswith("D"):
+            raise ChecklistDeliveryError("invalid_dm_response")
+        self._call(
+            "chat_postMessage",
+            posting=True,
+            channel=channel_id,
+            text="SeulSeul 해지가 완료되었습니다. 다시 이용하려면 `/seulseul 시작`을 입력해 주세요."
+            if deleted
+            else "현재 SeulSeul에 가입되어 있지 않습니다.",
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+
     def delete_previous_messages(self, workspace_id: str, user_id: str) -> None:
         """실행자의 1:1 DM에서 인증된 봇이 쓴 일반 메시지만 삭제한다."""
         identity = self._call("auth_test")

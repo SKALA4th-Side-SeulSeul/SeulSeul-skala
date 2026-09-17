@@ -110,6 +110,22 @@ def test_student_service_withdraws_personal_student_record() -> None:
     assert not service.withdraw(WORKSPACE_ID, USER_ID)
 
 
+def test_withdrawal_notification_follows_deletion_and_start_has_no_notification():
+    repository = InMemoryStudentRepository()
+    seen = []
+
+    def notify(user, deleted):
+        assert repository.get(WORKSPACE_ID, user) is None
+        seen.append((user, deleted))
+
+    service = StudentService(repository, on_withdraw=notify)
+    service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_가상학생")
+    assert seen == []
+    service.withdraw(WORKSPACE_ID, USER_ID)
+    service.withdraw(WORKSPACE_ID, USER_ID)
+    assert seen == [(USER_ID, True), (USER_ID, False)]
+
+
 def test_sqlalchemy_student_repository_upserts_student() -> None:
     session = MagicMock()
     session.__enter__.return_value = session

@@ -118,7 +118,10 @@ def main() -> None:
         notify=wakeup.set,
     )
     student_service = StudentService(
-        student_repository, on_change=wakeup.set, reset_messages=checklist_service.reset_messages
+        student_repository,
+        on_change=wakeup.set,
+        reset_messages=checklist_service.reset_messages,
+        on_withdraw=messenger.send_withdrawal,
     )
     app = create_app(slack_settings, notice_service, student_service)
     register_checklist_handlers(app, checklist_service)

@@ -50,10 +50,12 @@ class StudentService:
         reset_messages: Callable[
             [str, str], AbstractContextManager[None]
         ] = lambda workspace, user: nullcontext(),
+        on_withdraw: Callable[[str, bool], None] = lambda user, deleted: None,
     ) -> None:
         self._repository = repository
         self._on_change = on_change
         self._reset_messages = reset_messages
+        self._on_withdraw = on_withdraw
 
     def enroll(self, workspace_id: str, slack_user_id: str, real_name: str) -> Student:
         """성명을 검증하고 학생을 새로 저장하거나 최신 소속으로 갱신한다."""
@@ -78,5 +80,6 @@ class StudentService:
             raise ValueError("workspace_id와 slack_user_id는 비어 있을 수 없습니다.")
         with self._reset_messages(workspace_id, slack_user_id):
             deleted = self._repository.delete(workspace_id, slack_user_id)
+            self._on_withdraw(slack_user_id, deleted)
         self._on_change()
         return deleted
