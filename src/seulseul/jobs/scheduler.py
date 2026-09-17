@@ -13,7 +13,7 @@ class ChecklistScheduler:
         self._wakeup = wakeup
         self._interval = interval
         self.stopped = Event()
-        self._thread = Thread(target=self._run, name="daily-checklists", daemon=True)
+        self._thread = Thread(target=self._run, name="checklist-sync", daemon=True)
 
     def start(self) -> None:
         self._thread.start()

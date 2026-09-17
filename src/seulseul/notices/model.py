@@ -4,17 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -109,4 +113,21 @@ class NoticeModel(Base):
     checklists: Mapped[list[ChecklistModel]] = relationship(
         back_populates="notice",
         passive_deletes=True,
+    )
+
+
+class NoticeSourceModel(Base):
+    """링크가 모두 없어져도 원본의 최신 이벤트와 삭제 사실을 기억한다."""
+
+    __tablename__ = "notice_sources"
+
+    workspace_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    message_ts: Mapped[str] = mapped_column(String(32), primary_key=True)
+    revision: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    deleted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )

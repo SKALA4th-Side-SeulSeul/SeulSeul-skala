@@ -1,5 +1,6 @@
 """Slack Web API와 명령 응답 전송 경계."""
 
+import logging
 import math
 import re
 from collections.abc import Callable, Mapping
@@ -10,6 +11,8 @@ from slack_sdk.errors import SlackApiError, SlackClientError
 
 from seulseul.checklists.model import ChecklistDeliveryError, DailyChecklistBoard
 from seulseul.slack.views import build_daily_checklist_message
+
+logger = logging.getLogger(__name__)
 
 
 class SlackCommandResponder:
@@ -76,10 +79,28 @@ class SlackWebApiClient:
 
 
 class SlackChecklistClient:
-    """일일 일반 DM 전송·편집. 자동 HTTP 재시도로 첫 DM이 중복되지 않게 한다."""
+    """최초 일반 DM 전송·편집. 자동 HTTP 재시도로 첫 DM이 중복되지 않게 한다."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        self._use_container = True
+
+    def _deliver(self, method: str, board: DailyChecklistBoard, **kwargs: Any) -> Mapping[str, Any]:
+        try:
+            return self._call(
+                method,
+                **build_daily_checklist_message(board, use_container=self._use_container),
+                **kwargs,
+            )
+        except ChecklistDeliveryError as error:
+            if error.code != "invalid_blocks" or error.uncertain or not self._use_container:
+                raise
+            # Slack이 명시적으로 거절한 요청만 재구성한다. 응답 유실 때는 재전송하지 않는다.
+            self._use_container = False
+            logger.info("Slack 카드 서식 미지원: 기본 레이아웃으로 전환합니다.")
+            return self._call(
+                method, **build_daily_checklist_message(board, use_container=False), **kwargs
+            )
 
     @classmethod
     def from_token(cls, token: str) -> "SlackChecklistClient":
@@ -116,17 +137,76 @@ class SlackChecklistClient:
             raise ChecklistDeliveryError("invalid_workspace_response")
         return team_id
 
+    def delete_previous_messages(self, workspace_id: str, user_id: str) -> None:
+        """실행자의 1:1 DM에서 인증된 봇이 쓴 일반 메시지만 삭제한다."""
+        identity = self._call("auth_test")
+        bot_user = identity.get("user_id")
+        if identity.get("team_id") != workspace_id or not isinstance(bot_user, str) or not bot_user:
+            raise ChecklistDeliveryError("invalid_workspace_response")
+        opened = self._call("conversations_open", users=user_id)
+        channel = opened.get("channel")
+        channel_id = channel.get("id") if isinstance(channel, Mapping) else None
+        if not isinstance(channel_id, str) or not channel_id.startswith("D"):
+            raise ChecklistDeliveryError("invalid_dm_response")
+
+        def pages(method: str, **kwargs: Any):
+            cursor = ""
+            seen = set()
+            while True:
+                response = self._call(
+                    method, channel=channel_id, limit=100, cursor=cursor, **kwargs
+                )
+                messages = response.get("messages")
+                if not isinstance(messages, list):
+                    raise ChecklistDeliveryError("invalid_history_response")
+                yield from messages
+                cursor = (response.get("response_metadata") or {}).get("next_cursor", "")
+                if not cursor:
+                    if response.get("has_more"):
+                        raise ChecklistDeliveryError("incomplete_history_response")
+                    break
+                if cursor in seen:
+                    raise ChecklistDeliveryError("invalid_history_cursor")
+                seen.add(cursor)
+
+        # 페이지 순회 중 삭제하면 커서가 어긋날 수 있어 먼저 대상 전체를 수집한다.
+        timestamps: set[str] = set()
+
+        def collect(message: Mapping[str, Any]) -> None:
+            if message.get("user") == bot_user or (
+                identity.get("bot_id") and message.get("bot_id") == identity["bot_id"]
+            ):
+                ts = message.get("ts")
+                if not isinstance(ts, str) or not re.fullmatch(r"\d+\.\d+", ts):
+                    raise ChecklistDeliveryError("invalid_history_response")
+                timestamps.add(ts)
+
+        for message in pages("conversations_history"):
+            collect(message)
+            if message.get("reply_count", 0):
+                for reply in pages("conversations_replies", ts=message["ts"]):
+                    collect(reply)
+        # 답글부터 지우고 부모 메시지를 마지막에 지운다.
+        for ts in sorted(
+            timestamps, key=lambda value: tuple(map(int, value.split("."))), reverse=True
+        ):
+            try:
+                self._call("chat_delete", channel=channel_id, ts=ts)
+            except ChecklistDeliveryError as error:
+                if error.code != "message_not_found":
+                    raise
+
     def send(self, user_id: str, board: DailyChecklistBoard) -> tuple[str, str]:
         opened = self._call("conversations_open", users=user_id)
         channel = opened.get("channel")
         channel_id = channel.get("id") if isinstance(channel, Mapping) else None
         if not isinstance(channel_id, str) or not channel_id.startswith("D"):
             raise ChecklistDeliveryError("invalid_dm_response")
-        response = self._call(
+        response = self._deliver(
             "chat_postMessage",
+            board,
             posting=True,
             channel=channel_id,
-            **build_daily_checklist_message(board),
             unfurl_links=False,
             unfurl_media=False,
             metadata={
@@ -140,6 +220,4 @@ class SlackChecklistClient:
         return channel_id, ts
 
     def update(self, channel_id: str, message_ts: str, board: DailyChecklistBoard) -> None:
-        self._call(
-            "chat_update", channel=channel_id, ts=message_ts, **build_daily_checklist_message(board)
-        )
+        self._deliver("chat_update", board, channel=channel_id, ts=message_ts)

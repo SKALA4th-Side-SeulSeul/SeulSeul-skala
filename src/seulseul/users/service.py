@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 
 from seulseul.users.model import Student
@@ -42,10 +43,17 @@ def parse_student_real_name(real_name: str) -> StudentAffiliation:
 
 class StudentService:
     def __init__(
-        self, repository: StudentRepository, on_change: Callable[[], None] = lambda: None
+        self,
+        repository: StudentRepository,
+        on_change: Callable[[], None] = lambda: None,
+        *,
+        reset_messages: Callable[
+            [str, str], AbstractContextManager[None]
+        ] = lambda workspace, user: nullcontext(),
     ) -> None:
         self._repository = repository
         self._on_change = on_change
+        self._reset_messages = reset_messages
 
     def enroll(self, workspace_id: str, slack_user_id: str, real_name: str) -> Student:
         """성명을 검증하고 학생을 새로 저장하거나 최신 소속으로 갱신한다."""
@@ -59,7 +67,8 @@ class StudentService:
             campus="광주",
             class_number=affiliation.class_number,
         )
-        self._repository.save(student)
+        with self._reset_messages(workspace_id, slack_user_id):
+            self._repository.save(student)
         self._on_change()
         return student
 
@@ -67,6 +76,7 @@ class StudentService:
         """학생 개인정보와 외래 키로 연결된 개인 체크리스트를 삭제한다."""
         if not workspace_id or not slack_user_id:
             raise ValueError("workspace_id와 slack_user_id는 비어 있을 수 없습니다.")
-        deleted = self._repository.delete(workspace_id, slack_user_id)
+        with self._reset_messages(workspace_id, slack_user_id):
+            deleted = self._repository.delete(workspace_id, slack_user_id)
         self._on_change()
         return deleted

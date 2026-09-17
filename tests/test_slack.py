@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
@@ -11,6 +12,7 @@ from uuid import uuid4
 import pytest
 from slack_bolt import App
 from slack_sdk.errors import SlackApiError
+from slack_sdk.models.blocks import Block
 from slack_sdk.web import SlackResponse
 
 from seulseul.checklists.model import (
@@ -38,6 +40,111 @@ from seulseul.slack.handlers import (
 from seulseul.slack.views import build_daily_checklist_message
 from seulseul.users.repository import InMemoryStudentRepository
 from seulseul.users.service import StudentService
+
+
+def cleanup_client():
+    client = Mock()
+    client.auth_test.return_value = {"team_id": "TTEST", "user_id": "UBOT", "bot_id": "BBOT"}
+    client.conversations_open.return_value = {"channel": {"id": "DTEST"}}
+    return client
+
+
+@pytest.mark.parametrize("code", ["message_not_found", "ratelimited"])
+def test_cleanup_ignores_already_deleted_but_propagates_rate_limit(code):
+    client = cleanup_client()
+    client.conversations_history.return_value = {
+        "messages": [
+            {"user": "UBOT", "ts": "100.1"},
+            {"user": "UBOT", "ts": "100.2"},
+        ]
+    }
+    response = SlackResponse(
+        client=client,
+        http_verb="POST",
+        api_url="https://slack.com/api/chat.delete",
+        req_args={},
+        data={"ok": False, "error": code},
+        headers={},
+        status_code=200,
+    )
+    client.chat_delete.side_effect = [SlackApiError("failure", response), {"ok": True}]
+    adapter = SlackChecklistClient(client)
+    if code == "message_not_found":
+        adapter.delete_previous_messages("TTEST", "USTUDENT")
+        assert client.chat_delete.call_count == 2
+    else:
+        with pytest.raises(ChecklistDeliveryError):
+            adapter.delete_previous_messages("TTEST", "USTUDENT")
+        assert client.chat_delete.call_count == 1
+
+
+def test_cleanup_paginates_and_only_deletes_own_dm_messages_including_replies():
+    client = cleanup_client()
+    client.conversations_history.side_effect = [
+        {
+            "messages": [
+                {"user": "UBOT", "ts": "100.1"},
+                {"user": "USTUDENT", "ts": "100.2", "reply_count": 2},
+            ],
+            "response_metadata": {"next_cursor": "next"},
+        },
+        {
+            "messages": [
+                {"bot_id": "BBOT", "ts": "99.1"},
+                {"user": "UOTHERBOT", "bot_id": "BOTHER", "ts": "99.2"},
+            ]
+        },
+    ]
+    client.conversations_replies.return_value = {
+        "messages": [
+            {"user": "UBOT", "ts": "101.1"},
+            {"user": "USTUDENT", "ts": "101.2"},
+        ]
+    }
+    SlackChecklistClient(client).delete_previous_messages("TTEST", "USTUDENT")
+    client.conversations_open.assert_called_once_with(users="USTUDENT")
+    assert client.conversations_history.call_args_list[1].kwargs["cursor"] == "next"
+    assert [call.kwargs for call in client.chat_delete.call_args_list] == [
+        {"channel": "DTEST", "ts": ts} for ts in ["101.1", "100.1", "99.1"]
+    ]
+
+
+@pytest.mark.parametrize("case", ["workspace", "channel", "history"])
+def test_cleanup_refuses_unsafe_scope_or_incomplete_history(case):
+    client = cleanup_client()
+    if case == "workspace":
+        client.auth_test.return_value["team_id"] = "TOTHER"
+    elif case == "channel":
+        client.conversations_open.return_value = {"channel": {"id": "CCHANNEL"}}
+    else:
+        client.conversations_history.return_value = {"messages": [], "has_more": True}
+    with pytest.raises(ChecklistDeliveryError):
+        SlackChecklistClient(client).delete_previous_messages("TTEST", "USTUDENT")
+    client.chat_delete.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["시작", "해지"])
+def test_cleanup_failure_is_acknowledged_without_success_message(action):
+    @contextmanager
+    def reset(workspace, user):
+        raise ChecklistDeliveryError("missing_scope")
+        yield
+
+    repository = InMemoryStudentRepository()
+    handler = create_seulseul_command_handler(
+        StudentService(repository, reset_messages=reset),
+        FakeUserProfileProvider("4기_광주_3반_가상학생"),
+    )
+    ack, respond = Mock(), Mock()
+    handler(
+        ack,
+        respond,
+        {"text": action, "team_id": "TTEST", "user_id": "UTEST"},
+        logging.getLogger(__name__),
+    )
+    ack.assert_called_once()
+    assert "완료하지 않았습니다" in respond.call_args.args[0]
+
 
 CHANNEL_ID = "C0000000001"
 WORKSPACE_ID = "T0000000001"
@@ -321,6 +428,100 @@ def test_message_handler_skips_notice_when_permalink_lookup_fails() -> None:
     assert service.recent_notices(5) == []
 
 
+def edited_event(text, **overrides):
+    payload = {
+        "type": "message",
+        "subtype": "message_changed",
+        "channel": CHANNEL_ID,
+        "event_ts": "1789344200.000100",
+        "ts": "1789344200.000100",
+        "message": {"ts": MESSAGE_TS, "user": "UWRITER", "text": text},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def dispatch_message(handler, event, workspace=WORKSPACE_ID):
+    handler(
+        event,
+        {"team_id": workspace},
+        {"bot_user_id": "USEULSEUL", "bot_id": "BSEULSEUL"},
+        logging.getLogger("test"),
+    )
+
+
+def test_edit_before_create_looks_up_permalink_for_original_message_not_event():
+    service = NoticeService({CHANNEL_ID})
+    provider = FakePermalinkProvider()
+    handler = create_message_event_handler(service, provider)
+    dispatch_message(handler, edited_event("수정 공지 https://forms.example.test/task"))
+    assert provider.calls == [(CHANNEL_ID, MESSAGE_TS)]
+    assert service.recent_notices(5)[0].message_ts == MESSAGE_TS
+
+
+@pytest.mark.parametrize("action", ["edit", "remove_links", "delete"])
+def test_source_changes_use_stored_permalink_and_delete_never_calls_slack(action):
+    service = NoticeService({CHANNEL_ID})
+    dispatch_message(
+        create_message_event_handler(service, FakePermalinkProvider()), channel_message()
+    )
+    provider = Mock()
+    provider.get_message_permalink.side_effect = AssertionError("Slack 호출이 필요하지 않습니다")
+    handler = create_message_event_handler(service, provider)
+    payload = edited_event("수정 https://forms.example.test/task" if action == "edit" else "")
+    if action == "delete":
+        payload = {
+            "type": "message",
+            "subtype": "message_deleted",
+            "channel": CHANNEL_ID,
+            "event_ts": "1789344200.000100",
+            "deleted_ts": MESSAGE_TS,
+        }
+    dispatch_message(handler, payload)
+    provider.get_message_permalink.assert_not_called()
+    remaining = service.recent_notices(5)
+    assert len(remaining) == (1 if action == "edit" else 0)
+    if remaining:
+        assert remaining[0].text.startswith("수정")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        edited_event("링크 https://forms.example.test/task", channel="COUTSIDE"),
+        edited_event("링크 https://forms.example.test/task", message={"ts": MESSAGE_TS}),
+        edited_event("링크 https://forms.example.test/task", message=None),
+        edited_event(
+            "링크 https://forms.example.test/task",
+            message={
+                "ts": MESSAGE_TS,
+                "thread_ts": "1.000001",
+                "text": "https://forms.example.test/task",
+            },
+        ),
+    ],
+)
+def test_invalid_mutation_never_calls_provider_or_removes_existing_notice(payload):
+    service = NoticeService({CHANNEL_ID})
+    dispatch_message(
+        create_message_event_handler(service, FakePermalinkProvider()), channel_message()
+    )
+    provider = Mock()
+    dispatch_message(create_message_event_handler(service, provider), payload)
+    assert len(service.recent_notices(5)) == 1
+    provider.get_message_permalink.assert_not_called()
+
+
+def test_event_without_workspace_never_looks_up_permalink():
+    provider = Mock()
+    dispatch_message(
+        create_message_event_handler(NoticeService({CHANNEL_ID}), provider),
+        channel_message(),
+        workspace="",
+    )
+    provider.get_message_permalink.assert_not_called()
+
+
 def test_slack_web_client_returns_message_permalink() -> None:
     client = FakeSlackWebClient({"permalink": PERMALINK})
 
@@ -434,11 +635,16 @@ def daily_board():
     )
 
 
-def test_daily_view_has_links_explicit_buttons_and_plain_text_summary() -> None:
+def test_daily_view_has_links_explicit_icon_buttons_and_no_summary() -> None:
     board = daily_board()
     payload = build_daily_checklist_message(board)
-    section = next(block for block in payload["blocks"] if block.get("accessory"))
-    assert section["text"]["type"] == "plain_text"
+    section = next(
+        block for block in payload["blocks"][0]["child_blocks"] if block.get("accessory")
+    )
+    assert section["text"]["type"] == "mrkdwn"
+    assert board.items[0].summary not in str(payload)
+    assert section["accessory"]["text"]["text"] == "✓"
+    assert "완료로 표시" in section["accessory"]["accessibility_label"]
     assert section["accessory"]["action_id"] == "checklist_complete"
     value = json.loads(section["accessory"]["value"])
     assert value == {"daily": str(board.id), "item": str(board.items[0].id)}
@@ -453,6 +659,273 @@ def test_daily_view_has_links_explicit_buttons_and_plain_text_summary() -> None:
         completed_count=1,
     )
     assert "checklist_undo" in str(build_daily_checklist_message(completed))
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_daily_view_groups_bold_titles_and_secondary_metadata_in_card(completed):
+    board = daily_board()
+    board = replace(
+        board,
+        items=(replace(board.items[0], completed=completed),),
+        show_completed=completed,
+        pending_count=int(not completed),
+        completed_count=int(completed),
+    )
+    blocks = build_daily_checklist_message(board)["blocks"]
+    card = blocks[0]
+    assert card["type"] == "container"
+    assert card["title"] == {"type": "plain_text", "text": "내 체크리스트"}
+    assert card["subtitle"]["text"] == ("완료 목록 · 1개" if completed else "미완료 목록 · 1개")
+    assert card["width"] == "full" and card["has_header_divider"]
+    assert blocks[1]["type"] == "actions"
+    assert [button["action_id"] for button in blocks[1]["elements"]] == [
+        "checklist_pending" if completed else "checklist_completed",
+        "checklist_refresh",
+    ]
+    body, metadata = card["child_blocks"]
+    assert body["text"] == {
+        "type": "mrkdwn",
+        "text": f"📝 *<{board.items[0].original_url}|과제 &lt;@everyone&gt;>*",
+    }
+    assert metadata == {
+        "type": "context",
+        "elements": [
+            {"type": "plain_text", "text": "forms.example.test"},
+            {"type": "mrkdwn", "text": f"· 09/20 09:00 마감 · <{PERMALINK}|원문>"},
+        ],
+    }
+    assert body["accessory"]["action_id"] == (
+        "checklist_undo" if completed else "checklist_complete"
+    )
+    assert "[완료]" not in str(blocks) and "[미완료]" not in str(blocks)
+    assert "마감 전 항목" not in str(blocks)
+    assert "제출 링크" not in str(blocks)
+    assert body["accessory"]["text"]["text"] == ("↶" if completed else "✓")
+    assert (
+        "완료 취소" in body["accessory"]["accessibility_label"]
+        if completed
+        else "완료로 표시" in body["accessory"]["accessibility_label"]
+    )
+    assert "요약" not in str(blocks) and "09월 16일" not in str(blocks)
+    assert "제출 후 ✓ · 마지막 갱신 09/16 09:00" in str(blocks[-1])
+    assert "1/1" not in str(blocks[-1])
+    assert "📅" not in str(blocks)
+
+
+def test_daily_view_shortens_titles_and_escapes_mentions_without_showing_summary():
+    board = daily_board()
+    title = "<!channel> *제목*\n> <https://example.test|링크> & " * 20
+    summary = "<!here> *요약*\n> 본문 " * 100
+    items = tuple(
+        replace(board.items[0], id=uuid4(), title=title, summary=summary) for _ in range(5)
+    )
+    blocks = build_daily_checklist_message(replace(board, items=items, pending_count=5))["blocks"]
+    rows = blocks[0]["child_blocks"]
+    assert len(rows) == 10 and len(blocks) < 20
+    # SDK가 아직 container를 파싱하지 못하므로 자식은 SDK로, 컨테이너는 위 계약 테스트로 검증한다.
+    for block in [*rows, *blocks[1:]]:
+        parsed = Block.parse(block)
+        assert parsed is not None
+        parsed.to_dict()
+        if block.get("accessory"):
+            assert block["text"]["type"] == "mrkdwn"
+            assert "&lt;!channel&gt;" in block["text"]["text"]
+            assert "<!channel>" not in block["text"]["text"]
+            assert block["text"]["text"].endswith("…>*")
+            assert "\n" not in block["text"]["text"]
+    assert "요약" not in str(blocks)
+    assert items[0].title == title and items[0].summary == summary
+
+
+def test_daily_view_links_each_title_to_its_own_submission_and_preserves_url():
+    board = daily_board()
+    urls = (
+        "https://forms.example.test/task-one?name=A%20B&choice=1%7C2#step-2",
+        "https://docs.example.test/task-two?answer=%3Cyes%3E&lang=ko",
+    )
+    items = tuple(
+        replace(board.items[0], id=uuid4(), title=f"과제 {i}", original_url=url)
+        for i, url in enumerate(urls, start=1)
+    )
+    blocks = build_daily_checklist_message(replace(board, items=items, pending_count=2))["blocks"]
+    title_blocks = [block for block in blocks[0]["child_blocks"] if block.get("accessory")]
+    assert len(title_blocks) == len(items)
+    for block, item in zip(title_blocks, items, strict=True):
+        assert f"<{item.original_url.replace('&', '&amp;')}|{item.title}>" in block["text"]["text"]
+    assert all("제출 링크" not in str(block) for block in blocks)
+
+
+def test_empty_daily_view_keeps_empty_state_and_shows_last_updated_in_seoul():
+    board = replace(daily_board(), items=(), pending_count=0)
+    payload = build_daily_checklist_message(board)
+    assert "마지막 갱신 09/16 09:00" in str(payload)
+    assert "마감 전 항목" not in str(payload)
+    assert "현재 남은 할 일이 없어요." in str(payload)
+    card = payload["blocks"][0]
+    assert card["type"] == "container"
+    assert len(card["child_blocks"]) == 1
+    assert card["child_blocks"][0]["type"] == "section"
+
+
+@pytest.mark.parametrize(
+    ("show_completed", "pending", "completed"),
+    [
+        (True, 1, 1),
+        (True, 2, 0),
+        (True, 0, 1),
+        (False, 1, 1),
+        (False, 0, 1),
+        (True, 0, 0),
+        (False, 0, 0),
+    ],
+)
+def test_daily_view_identifies_filter_and_points_to_hidden_pending_notices(
+    show_completed, pending, completed
+):
+    board = replace(
+        daily_board(),
+        show_completed=show_completed,
+        pending_count=pending,
+        completed_count=completed,
+    )
+    if not (completed if show_completed else pending):
+        board = replace(board, items=())
+    elif show_completed:
+        board = replace(board, items=(replace(board.items[0], completed=True),))
+    payload = build_daily_checklist_message(board)
+    hint = f"완료 목록 · {completed}개" if show_completed else f"미완료 목록 · {pending}개"
+    assert hint == payload["blocks"][0]["subtitle"]["text"]
+    assert hint in payload["text"]
+    assert all(block["type"] != "header" for block in payload["blocks"])
+    buttons = payload["blocks"][1]["elements"]
+    assert [button["action_id"] for button in buttons] == [
+        "checklist_pending" if show_completed else "checklist_completed",
+        "checklist_refresh",
+    ]
+    assert buttons[0]["text"] == {
+        "type": "plain_text",
+        "text": f"미완료 보기 ({pending})" if show_completed else f"완료 보기 ({completed})",
+    }
+    for button in buttons:
+        assert "style" not in button
+        assert "✓" not in button["text"]["text"]
+        assert json.loads(button["value"]) == {"daily": str(board.id)}
+    assert buttons[1]["text"]["text"] == "새로고침"
+
+
+@pytest.mark.parametrize(
+    ("url", "icon"),
+    [
+        ("https://forms.gle/task", "📝"),
+        ("https://docs.google.com/forms/d/task", "📝"),
+        ("https://form.naver.com/response/task", "📝"),
+        ("https://docs.google.com/document/d/task", "📄"),
+        ("https://example.test/FORMS/task", "📝"),
+        ("https://example.test/%64ocs/task?form=1", "📄"),
+        ("https://example.test/task?forms=1", "🔗"),
+    ],
+)
+def test_daily_view_distinguishes_forms_from_documents_using_host_and_path(url, icon):
+    board = daily_board()
+    board = replace(board, items=(replace(board.items[0], original_url=url),))
+    row = next(
+        block
+        for block in build_daily_checklist_message(board)["blocks"][0]["child_blocks"]
+        if block.get("accessory")
+    )
+    assert row["text"]["text"].startswith(icon + " ")
+
+
+@pytest.mark.parametrize("length", [27, 28, 29, 200])
+def test_daily_view_title_limit_is_display_only(length):
+    board = daily_board()
+    title = "제" * length
+    item = replace(board.items[0], title=title)
+    row = next(
+        block
+        for block in build_daily_checklist_message(replace(board, items=(item,)))["blocks"][0][
+            "child_blocks"
+        ]
+        if block.get("accessory")
+    )
+    label = title if length <= 28 else title[:27] + "…"
+    assert f"|{label}>" in row["text"]["text"]
+    assert len(label) <= 28 and item.title == title
+
+
+def test_card_fallback_keeps_all_rows_controls_and_secondary_information():
+    board = daily_board()
+    card_payload = build_daily_checklist_message(board)
+    fallback = build_daily_checklist_message(board, use_container=False)
+    assert fallback["text"] == card_payload["text"]
+    assert not any(block["type"] == "container" for block in fallback["blocks"])
+    assert fallback["blocks"][2:-2] == card_payload["blocks"][0]["child_blocks"]
+    assert fallback["blocks"][-2:] == card_payload["blocks"][1:]
+    for block in fallback["blocks"]:
+        parsed = Block.parse(block)
+        assert parsed is not None
+        parsed.to_dict()
+
+
+def test_card_footer_only_shows_page_count_when_multiple_pages_exist():
+    board = replace(daily_board(), page=1, page_count=3)
+    blocks = build_daily_checklist_message(board)["blocks"]
+    assert blocks[-1]["elements"][0]["text"].startswith("2/3 · ")
+    navigation = blocks[-2]["elements"]
+    assert [button["action_id"] for button in navigation] == [
+        "checklist_previous",
+        "checklist_next",
+    ]
+
+
+@pytest.mark.parametrize("operation", ["send", "update"])
+def test_daily_client_falls_back_once_only_when_card_blocks_are_explicitly_rejected(operation):
+    client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "DTEST"}}
+    response = SlackResponse(
+        client=Mock(),
+        http_verb="POST",
+        api_url="https://slack.com/api/test",
+        req_args={},
+        data={"ok": False, "error": "invalid_blocks"},
+        headers={},
+        status_code=200,
+    )
+    method = client.chat_postMessage if operation == "send" else client.chat_update
+    method.side_effect = [
+        SlackApiError("invalid blocks", response),
+        {"ts": "123.456"},
+        {"ts": "123.456"},
+    ]
+    adapter = SlackChecklistClient(client)
+    board = daily_board()
+    if operation == "send":
+        assert adapter.send(USER_ID, board) == ("DTEST", "123.456")
+    else:
+        adapter.update("DTEST", "123.456", board)
+    calls = method.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["blocks"][0]["type"] == "container"
+    assert all(block["type"] != "container" for block in calls[1].kwargs["blocks"])
+    assert calls[0].kwargs["channel"] == calls[1].kwargs["channel"] == "DTEST"
+    client.chat_update.side_effect = None
+    adapter.update("DTEST", "123.456", board)
+    assert all(
+        block["type"] != "container" for block in client.chat_update.call_args.kwargs["blocks"]
+    )
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_card_fallback_never_reposts_on_network_or_ambiguous_errors(uncertain):
+    client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "DTEST"}}
+    client.chat_postMessage.side_effect = ChecklistDeliveryError(
+        "invalid_blocks" if uncertain else "slack_connection_error", uncertain=uncertain
+    )
+    adapter = SlackChecklistClient(client)
+    with pytest.raises(ChecklistDeliveryError):
+        adapter.send(USER_ID, daily_board())
+    client.chat_postMessage.assert_called_once()
 
 
 def test_daily_client_posts_regular_dm_and_updates_by_saved_address() -> None:

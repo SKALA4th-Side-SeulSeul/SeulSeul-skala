@@ -7,7 +7,7 @@ from typing import Any
 
 from slack_bolt import App
 
-from seulseul.checklists.model import ChecklistActionError
+from seulseul.checklists.model import ChecklistActionError, ChecklistDeliveryError
 from seulseul.checklists.service import DailyChecklistService
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import (
@@ -51,13 +51,20 @@ def create_seulseul_command_handler(
             logger.warning("명령어 식별자 누락: action=%s", action)
             return
 
-        if action == START_ACTION:
-            _enroll_student(student_service, profile_provider, workspace_id, user_id, responder)
-        elif action == WITHDRAW_ACTION:
-            deleted = student_service.withdraw(workspace_id, user_id)
-            responder.send(build_withdrawal_text(user_id, deleted))
-        else:
-            responder.send(build_command_help_text(user_id))
+        try:
+            if action == START_ACTION:
+                _enroll_student(student_service, profile_provider, workspace_id, user_id, responder)
+            elif action == WITHDRAW_ACTION:
+                deleted = student_service.withdraw(workspace_id, user_id)
+                responder.send(build_withdrawal_text(user_id, deleted))
+            else:
+                responder.send(build_command_help_text(user_id))
+        except ChecklistDeliveryError as error:
+            logger.warning("명령 DM 정리 실패: code=%s", error.code)
+            responder.send(
+                "기존 봇 메시지 정리를 완료하지 못해 요청을 완료하지 않았습니다. "
+                "앱의 im:history 권한과 연결 상태를 확인한 뒤 같은 명령을 다시 실행해 주세요."
+            )
         logger.info(
             "명령어 처리: command=%s action=%s channel=%s",
             command.get("command"),
@@ -102,24 +109,12 @@ def create_message_event_handler(
     ) -> None:
         bot_user_id = str(context.get("bot_user_id") or "") or None
         bot_id = str(context.get("bot_id") or "") or None
-        if not notice_service.accepts_message(event, bot_user_id, bot_id):
+        parsed = notice_service.parse_event(event, bot_user_id, bot_id)
+        if parsed is None:
             logger.info(
                 "메시지 이벤트 제외: channel=%s ts=%s",
                 event.get("channel"),
                 event.get("ts"),
-            )
-            return
-
-        try:
-            source_permalink = permalink_provider.get_message_permalink(
-                str(event["channel"]), str(event["ts"])
-            )
-        except MessagePermalinkError as error:
-            logger.warning(
-                "공지 원문 링크 조회 실패: channel=%s ts=%s 원인=%s",
-                event.get("channel"),
-                event.get("ts"),
-                error,
             )
             return
 
@@ -132,6 +127,23 @@ def create_message_event_handler(
             )
             return
 
+        source_permalink = ""
+        if notice_service.needs_permalink(parsed):
+            source_permalink = notice_service.stored_permalink(workspace_id, parsed) or ""
+            if not source_permalink:
+                try:
+                    source_permalink = permalink_provider.get_message_permalink(
+                        parsed.channel_id, parsed.message_ts
+                    )
+                except MessagePermalinkError as error:
+                    logger.warning(
+                        "공지 원문 링크 조회 실패: channel=%s ts=%s 원인=%s",
+                        parsed.channel_id,
+                        parsed.message_ts,
+                        error,
+                    )
+                    return
+
         notices = notice_service.record_channel_message(
             event,
             workspace_id=workspace_id,
@@ -142,7 +154,7 @@ def create_message_event_handler(
         logger.info(
             "메시지 이벤트 처리: channel=%s ts=%s notices=%d processed=%d failed=%d",
             event.get("channel"),
-            event.get("ts"),
+            parsed.message_ts,
             len(notices),
             sum(notice.processing_status == "processed" for notice in notices),
             sum(notice.processing_status == "processing_failed" for notice in notices),

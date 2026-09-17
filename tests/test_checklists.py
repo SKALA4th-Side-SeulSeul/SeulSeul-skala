@@ -1,6 +1,8 @@
 """체크리스트 ORM 모델의 관계와 상태 컬럼을 확인한다."""
 
+import hashlib
 import json
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -9,6 +11,8 @@ import pytest
 from sqlalchemy import UniqueConstraint, create_engine, delete, event, select
 from sqlalchemy.orm import configure_mappers, sessionmaker
 
+from seulseul.ai.client import AiClientError
+from seulseul.ai.model import NoticeAnalysis
 from seulseul.checklists.model import (
     ChecklistActionError,
     ChecklistDeliveryError,
@@ -19,6 +23,8 @@ from seulseul.checklists.repository import SqlAlchemyChecklistRepository
 from seulseul.checklists.service import DailyChecklistService
 from seulseul.database import Base
 from seulseul.notices.model import NoticeModel
+from seulseul.notices.repository import SqlAlchemyNoticeRepository
+from seulseul.notices.service import NoticeService
 from seulseul.users.model import StudentModel
 
 
@@ -63,6 +69,10 @@ class RecordingMessenger:
             raise self.error
         self.updated.append((channel_id, message_ts, board))
 
+    def delete_previous_messages(self, workspace_id, user_id):
+        if self.error:
+            raise self.error
+
 
 @pytest.fixture
 def daily_system():
@@ -82,6 +92,63 @@ def daily_system():
     )
     yield factory, repository, messenger, clock, service
     engine.dispose()
+
+
+def test_command_reset_replaces_dm_but_preserves_completion_and_other_students(daily_system):
+    factory, _, messenger, _, service = daily_system
+    student_id = add_student(factory)
+    add_student(factory, user="UTWO")
+    add_notice(factory)
+    service.run_due()
+    with factory() as session, session.begin():
+        item = session.scalar(select(ChecklistModel).where(ChecklistModel.student_id == student_id))
+        item.completed_at = NOW
+    with service.reset_messages(WORKSPACE, "UONE"):
+        assert len(get_daily(factory)) == 2
+    assert len(get_daily(factory)) == 1
+    service.run_due()
+    assert len(messenger.sent) == 3
+    assert messenger.sent[-1][1].completed_count == 1
+    assert len(get_daily(factory)) == 2
+
+
+def test_withdraw_cleanup_does_not_send_replacement(daily_system):
+    factory, _, messenger, _, service = daily_system
+    student_id = add_student(factory)
+    add_notice(factory)
+    service.run_due()
+    with service.reset_messages(WORKSPACE, "UONE"):
+        with factory() as session, session.begin():
+            session.execute(delete(StudentModel).where(StudentModel.id == student_id))
+    service.run_due()
+    assert len(messenger.sent) == 1
+    assert get_daily(factory) == []
+    with factory() as session:
+        assert session.scalar(select(ChecklistModel)) is None
+
+
+@pytest.mark.parametrize("already_sent", [False, True])
+def test_failed_cleanup_stays_paused_after_restart_until_command_retried(
+    daily_system, already_sent
+):
+    factory, repository, messenger, clock, service = daily_system
+    add_student(factory)
+    if already_sent:
+        service.run_due()
+    messenger.error = ChecklistDeliveryError("missing_scope")
+    with pytest.raises(ChecklistDeliveryError), service.reset_messages(WORKSPACE, "UONE"):
+        pytest.fail("cleanup failure must not continue enrollment or withdrawal")
+    assert get_daily(factory)[0].last_error == "dm_cleanup_pending"
+    messenger.error = None
+    restarted = DailyChecklistService(
+        repository, messenger, WORKSPACE, TARGETS, clock=lambda: clock[0]
+    )
+    restarted.run_due()
+    assert len(messenger.sent) == int(already_sent)
+    with restarted.reset_messages(WORKSPACE, "UONE"):
+        pass
+    restarted.run_due()
+    assert len(messenger.sent) == int(already_sent) + 1
 
 
 def add_student(factory, user="UONE", class_number=3, workspace=WORKSPACE):
@@ -136,13 +203,122 @@ def click(service, daily, operation, item=None, *, user="UONE", workspace=WORKSP
     )
 
 
-def test_assigns_before_nine_and_sends_one_dm_per_seoul_day(daily_system):
+def test_source_edits_link_removal_restoration_and_delete_update_same_dm(daily_system):
+    factory, _, messenger, _, daily_service = daily_system
+    add_student(factory)
+
+    class Analyzer:
+        fail = False
+
+        def analyze(self, text, url, posted_at):
+            if self.fail:
+                raise AiClientError("분석 실패")
+            return NoticeAnalysis(
+                text.split()[0], "폼을 제출하세요", NOW + timedelta(days=2), "모레"
+            )
+
+    analyzer = Analyzer()
+    notice_service = NoticeService(
+        {"CALL"},
+        analyzer=analyzer,
+        repository=SqlAlchemyNoticeRepository(factory),
+        on_change=daily_service.run_due,
+    )
+    source_ts = f"{int(NOW.timestamp()) - 86400}.000100"
+    link = "https://forms.example.test/task"
+    source = {
+        "type": "message",
+        "channel": "CALL",
+        "channel_type": "channel",
+        "ts": source_ts,
+        "user": "UWRITER",
+        "text": "첫과제 " + link,
+    }
+
+    def record_event(event):
+        return notice_service.record_channel_message(
+            event,
+            workspace_id=WORKSPACE,
+            source_permalink="https://workspace.slack.com/archives/CALL/p123",
+        )
+
+    def edit(text, seconds):
+        return record_event(
+            {
+                "type": "message",
+                "subtype": "message_changed",
+                "channel": "CALL",
+                "event_ts": f"{int(NOW.timestamp()) + seconds}.000100",
+                "message": {"ts": source_ts, "text": text, "user": "UWRITER"},
+            }
+        )
+
+    record_event(source)
+    daily = get_daily(factory)[0]
+    original_item = messenger.sent[0][1].items[0]
+    click(daily_service, daily, "complete", original_item.id)
+    click(daily_service, daily, "completed")
+    with factory() as session:
+        completed_at = session.get(ChecklistModel, original_item.id).completed_at
+    edit("수정과제 " + link, 1)
+    assert messenger.updated[-1][2].items[0].title == "수정과제"
+    assert messenger.updated[-1][2].items[0].completed
+
+    analyzer.fail = True
+    edit("분석실패과제 " + link, 2)
+    daily_service.run_due()
+    assert messenger.updated[-1][2].items[0].title == "수정과제"
+
+    edit("링크 없음", 3)
+    assert messenger.updated[-1][2].items == ()
+    with factory() as session:
+        item = session.get(ChecklistModel, original_item.id)
+        assert item.deleted_at is not None and item.completed_at == completed_at
+        assert session.get(NoticeModel, item.notice_id).deleted_at is not None
+    with pytest.raises(ChecklistActionError, match="삭제"):
+        click(daily_service, daily, "undo", original_item.id)
+
+    # 삭제했던 링크의 재분석 실패는 옛 분석으로 항목을 되살리지 않는다.
+    edit("복구과제 " + link, 4)
+    daily_service.run_due()
+    assert messenger.updated[-1][2].items == ()
+    analyzer.fail = False
+    notice_service.retry_failed_notice(WORKSPACE, link)
+    assert messenger.updated[-1][2].items[0].id == original_item.id
+    assert messenger.updated[-1][2].items[0].title == "복구과제"
+    assert messenger.updated[-1][2].items[0].completed
+
+    edit("추가과제 " + link + " https://docs.example.test/added", 5)
+    with factory() as session:
+        assert len(session.execute(select(ChecklistModel)).scalars().all()) == 2
+        assert session.get(ChecklistModel, original_item.id).completed_at == completed_at
+    record_event(
+        {
+            "type": "message",
+            "subtype": "message_deleted",
+            "channel": "CALL",
+            "deleted_ts": source_ts,
+            "event_ts": f"{int(NOW.timestamp()) + 6}.000100",
+        }
+    )
+    assert messenger.updated[-1][2].items == ()
+    with factory() as session:
+        items = session.execute(select(ChecklistModel)).scalars().all()
+        assert all(item.deleted_at is not None for item in items)
+        assert session.get(ChecklistModel, original_item.id).completed_at == completed_at
+    assert len(messenger.sent) == 1
+    assert all(
+        address[:2] == (daily.dm_channel_id, daily.message_ts) for address in messenger.updated
+    )
+
+
+def test_sends_immediately_once_and_reuses_message_across_days_and_restart(daily_system):
     factory, _, messenger, clock, service = daily_system
     add_student(factory)
     add_notice(factory)
     clock[0] = NOW - timedelta(seconds=1)
     service.run_due()
-    assert messenger.sent == [] and get_daily(factory) == []
+    assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
     with factory() as session:
         assert len(session.execute(select(ChecklistModel)).scalars().all()) == 1
     clock[0] = NOW
@@ -155,7 +331,22 @@ def test_assigns_before_nine_and_sends_one_dm_per_seoul_day(daily_system):
     assert len(messenger.sent) == 1
     clock[0] = NOW + timedelta(days=1)
     service.run_due()
-    assert len(messenger.sent) == 2 and len(get_daily(factory)) == 2
+    assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
+    assert messenger.updated == []
+    restarted = DailyChecklistService(
+        SqlAlchemyChecklistRepository(factory),
+        messenger,
+        WORKSPACE,
+        TARGETS,
+        clock=lambda: clock[0],
+    )
+    restarted.run_due()
+    add_notice(factory, title="다음 날 공지")
+    restarted.run_due()
+    daily = get_daily(factory)[0]
+    assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
+    assert messenger.updated[-1][:2] == (daily.dm_channel_id, daily.message_ts)
+    assert len(messenger.updated[-1][2].items) == 2
 
 
 def test_empty_day_gets_dm_and_new_notice_updates_same_message(daily_system):
@@ -169,6 +360,69 @@ def test_empty_day_gets_dm_and_new_notice_updates_same_message(daily_system):
     assert len(messenger.sent) == 1
     assert messenger.updated[0][:2] == (daily.dm_channel_id, daily.message_ts)
     assert messenger.updated[0][2].pending_count == 1
+
+
+@pytest.mark.parametrize("hour", [0, 8, 9, 23])
+def test_first_connection_sends_at_any_seoul_hour(daily_system, hour):
+    factory, _, messenger, clock, service = daily_system
+    clock[0] = NOW + timedelta(hours=hour - 9)
+    add_student(factory)
+    service.run_due()
+    service.run_due()
+    assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
+    assert get_daily(factory)[0].message_date.isoformat() == "2026-09-16"
+
+
+@pytest.mark.parametrize(("channel", "ts"), [("DUONE", None), (None, "1.1"), (None, None)])
+def test_incomplete_sent_address_is_not_replaced_with_new_dm(daily_system, channel, ts):
+    factory, _, messenger, _, service = daily_system
+    student_id = add_student(factory)
+    with factory() as session, session.begin():
+        session.add(
+            DailyChecklistMessageModel(
+                student_id=student_id,
+                message_date=NOW.date(),
+                dm_channel_id=channel,
+                message_ts=ts,
+                status="sent",
+            )
+        )
+    service.run_due()
+    service.run_due()
+    assert messenger.sent == [] and messenger.updated == []
+    assert len(get_daily(factory)) == 1
+    assert get_daily(factory)[0].status == "uncertain"
+
+
+def test_presentation_change_updates_existing_dm_once_without_changing_completion(daily_system):
+    factory, _, messenger, clock, service = daily_system
+    add_student(factory)
+    add_notice(factory)
+    service.run_due()
+    daily = get_daily(factory)[0]
+    item = messenger.sent[0][1].items[0]
+    click(service, daily, "complete", item.id)
+    click(service, daily, "completed")
+    legacy_content = asdict(messenger.updated[-1][2])
+    legacy_content.pop("refreshed_at")
+    legacy_hash = hashlib.sha256(
+        json.dumps(legacy_content, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    with factory() as session, session.begin():
+        session.get(DailyChecklistMessageModel, daily.id).content_hash = legacy_hash
+        completed_at = session.get(ChecklistModel, item.id).completed_at
+    previous_updates = len(messenger.updated)
+
+    service.run_due()
+    clock[0] += timedelta(minutes=5)
+    service.run_due()
+
+    assert len(messenger.sent) == 1 and len(messenger.updated) == previous_updates + 1
+    assert messenger.updated[-1][:2] == (daily.dm_channel_id, daily.message_ts)
+    assert messenger.updated[-1][2].items[0].completed
+    assert get_daily(factory)[0].content_hash != legacy_hash
+    with factory() as session:
+        assert session.get(ChecklistModel, item.id).completed_at == completed_at
 
 
 def test_filters_workspace_class_failed_deleted_and_expired_notices(daily_system):
@@ -233,12 +487,81 @@ def test_complete_duplicate_click_view_and_undo_use_same_dm(daily_system):
     assert len(messenger.sent) == 1
 
 
+def test_second_survey_is_assigned_while_completed_filter_stays_on(daily_system):
+    factory, _, messenger, _, daily_service = daily_system
+    student_id = add_student(factory)
+
+    class SurveyAnalyzer:
+        def analyze(self, text, url, posted_at):
+            spring = "스프링" in text
+            return NoticeAnalysis(
+                "스프링 개발 서베이" if spring else "모델 개발 서베이",
+                "스프링 서베이에 참여하세요" if spring else "모델 서베이에 참여하세요",
+                NOW + timedelta(days=10 if spring else 11),
+                "9/26(토)" if spring else "9/27(일)",
+            )
+
+    service = NoticeService(
+        {"CALL"},
+        analyzer=SurveyAnalyzer(),
+        repository=SqlAlchemyNoticeRepository(factory),
+        on_change=daily_service.run_due,
+    )
+
+    def post(course, path, seconds, deadline):
+        link = f"https://forms.example.test/{path}"
+        return service.record_channel_message(
+            {
+                "type": "message",
+                "channel": "CALL",
+                "channel_type": "channel",
+                "ts": f"{int(NOW.timestamp()) + seconds}.000100",
+                "user": "UWRITER",
+                "text": f"{course} 교과목 종료 서베이 <{link}>에 참여해주세요!\n"
+                f"※ 마감일 : ~{deadline}",
+            },
+            workspace_id=WORKSPACE,
+            source_permalink=f"https://workspace.slack.com/archives/CALL/p{path}",
+        )
+
+    post("모델 개발", "model", 0, "9/27(일)")
+    daily = get_daily(factory)[0]
+    first_item = messenger.sent[0][1].items[0]
+    click(daily_service, daily, "complete", first_item.id)
+    click(daily_service, daily, "completed")
+
+    post("스프링 개발", "spring", 1, "9/26(토)")
+
+    completed_board = messenger.updated[-1][2]
+    assert completed_board.show_completed
+    assert (completed_board.pending_count, completed_board.completed_count) == (1, 1)
+    assert [item.title for item in completed_board.items] == ["모델 개발 서베이"]
+    assert completed_board.items[0].completed
+    with factory() as session:
+        assert len(session.scalars(select(NoticeModel)).all()) == 2
+        assigned = session.scalars(
+            select(ChecklistModel).where(ChecklistModel.student_id == student_id)
+        ).all()
+        assert len(assigned) == 2 and sum(item.completed_at is not None for item in assigned) == 1
+
+    click(daily_service, daily, "refresh")
+    assert get_daily(factory)[0].show_completed
+    click(daily_service, daily, "pending")
+    pending_board = messenger.updated[-1][2]
+    assert not pending_board.show_completed
+    assert [item.title for item in pending_board.items] == ["스프링 개발 서베이"]
+    assert pending_board.items[0].original_url == "https://forms.example.test/spring"
+    assert pending_board.items[0].deadline_at < first_item.deadline_at
+    assert not pending_board.items[0].completed
+    assert len(messenger.sent) == 1
+    assert messenger.updated[-1][:2] == (daily.dm_channel_id, daily.message_ts)
+
+
 @pytest.mark.parametrize(
     "case",
     [
         "other_user",
         "other_workspace",
-        "old_day",
         "expired",
         "deleted",
         "withdrawn",
@@ -247,7 +570,7 @@ def test_complete_duplicate_click_view_and_undo_use_same_dm(daily_system):
     ],
 )
 def test_unauthorized_and_stale_buttons_cannot_change_state(daily_system, case):
-    factory, _, messenger, clock, service = daily_system
+    factory, _, messenger, _, service = daily_system
     student_id = add_student(factory)
     add_student(factory, user="UOTHER")
     notice_id = add_notice(factory)
@@ -260,8 +583,6 @@ def test_unauthorized_and_stale_buttons_cannot_change_state(daily_system, case):
         kwargs["user"] = "UOTHER"
     elif case == "other_workspace":
         kwargs["workspace"] = "TOTHER"
-    elif case == "old_day":
-        clock[0] += timedelta(days=1)
     elif case == "wrong_message":
         daily.message_ts = "999.999"
     elif case == "wrong_item":
@@ -321,16 +642,16 @@ def test_delivery_lease_blocks_parallel_send_and_unknown_result_blocks_resend(da
     factory, repository, messenger, clock, service = daily_system
     add_student(factory)
     recipient = repository.recipients(WORKSPACE)[0]
-    claim = repository.prepare_delivery(recipient, TARGETS, NOW.date(), NOW)
+    claim = repository.prepare_delivery(recipient, TARGETS, NOW)
     assert claim is not None
-    assert repository.prepare_delivery(recipient, TARGETS, NOW.date(), NOW) is None
+    assert repository.prepare_delivery(recipient, TARGETS, NOW) is None
     clock[0] += timedelta(minutes=4)
     service.run_due()
     assert messenger.sent == []
     assert get_daily(factory)[0].status == "uncertain"
 
 
-def test_known_failure_retries_but_uncertain_first_send_does_not(daily_system):
+def test_known_first_send_failure_retries_same_record(daily_system):
     factory, _, messenger, clock, service = daily_system
     add_student(factory)
     messenger.error = ChecklistDeliveryError("ratelimited", retry_after=60)
@@ -343,14 +664,19 @@ def test_known_failure_retries_but_uncertain_first_send_does_not(daily_system):
     clock[0] += timedelta(seconds=30)
     service.run_due()
     assert len(messenger.sent) == 1
-    clock[0] += timedelta(days=1)
+    assert len(get_daily(factory)) == 1
+
+
+def test_uncertain_first_send_does_not_retry_even_after_date_change(daily_system):
+    factory, _, messenger, clock, service = daily_system
+    add_student(factory)
     messenger.error = ChecklistDeliveryError("connection_lost", uncertain=True)
     service.run_due()
     messenger.error = None
-    clock[0] += timedelta(minutes=10)
+    clock[0] += timedelta(days=2)
     service.run_due()
-    assert len(messenger.sent) == 1
-    assert any(row.status == "uncertain" for row in get_daily(factory))
+    assert messenger.sent == [] and messenger.updated == []
+    assert len(get_daily(factory)) == 1 and get_daily(factory)[0].status == "uncertain"
 
 
 def test_update_failure_keeps_message_address_and_retries_edit(daily_system):
@@ -391,15 +717,108 @@ def test_invalid_button_payload_is_rejected(daily_system, payload):
         service.handle_action(WORKSPACE, "UONE", "D1", "1.1", "complete", payload)
 
 
-def test_buttons_before_nine_do_not_change_yesterdays_items(daily_system):
+def test_original_buttons_work_after_midnight_and_preserve_completion_next_day(daily_system):
     factory, _, messenger, clock, service = daily_system
     add_student(factory)
     add_notice(factory)
     service.run_due()
     daily = get_daily(factory)[0]
     clock[0] = NOW + timedelta(hours=16)  # 다음 날 서울 오전 1시
-    with pytest.raises(ChecklistActionError, match="오전 9시"):
-        click(service, daily, "complete", messenger.sent[0][1].items[0].id)
+    item_id = messenger.sent[0][1].items[0].id
+    click(service, daily, "complete", item_id)
+    click(service, daily, "completed")
+    assert messenger.updated[-1][2].items[0].completed
+    clock[0] = NOW + timedelta(days=1)
+    service.run_due()
+    assert get_daily(factory)[0].show_completed
+    click(service, daily, "undo", item_id)
+    click(service, daily, "pending")
+    assert not messenger.updated[-1][2].items[0].completed
+    assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
+
+
+def test_legacy_daily_records_reuse_first_sent_message_and_reject_other_buttons(daily_system):
+    factory, _, messenger, _, service = daily_system
+    student_id = add_student(factory)
+    with factory() as session, session.begin():
+        oldest = DailyChecklistMessageModel(
+            student_id=student_id,
+            message_date=(NOW - timedelta(days=3)).date(),
+            dm_channel_id="DUONE",
+            message_ts="1.1",
+            status="sent",
+            show_completed=True,
+        )
+        newer = DailyChecklistMessageModel(
+            student_id=student_id,
+            message_date=NOW.date(),
+            dm_channel_id="DUONE",
+            message_ts="2.2",
+            status="sent",
+        )
+        failed = DailyChecklistMessageModel(
+            student_id=student_id,
+            message_date=(NOW - timedelta(days=4)).date(),
+            status="retry",
+        )
+        session.add_all([oldest, newer, failed])
+    service.run_due()
+    assert messenger.sent == [] and len(get_daily(factory)) == 3
+    assert messenger.updated[-1][:2] == ("DUONE", "1.1")
+    assert messenger.updated[-1][2].show_completed
+    with pytest.raises(ChecklistActionError, match="현재 연결된"):
+        click(service, newer, "pending")
+    assert click(service, oldest, "pending")
+
+
+def test_legacy_uncertain_record_blocks_new_send_instead_of_using_newer_pending(daily_system):
+    factory, _, messenger, _, service = daily_system
+    student_id = add_student(factory)
+    with factory() as session, session.begin():
+        session.add_all(
+            [
+                DailyChecklistMessageModel(
+                    student_id=student_id,
+                    message_date=(NOW - timedelta(days=1)).date(),
+                    status="uncertain",
+                ),
+                DailyChecklistMessageModel(student_id=student_id, message_date=NOW.date()),
+            ]
+        )
+    service.run_due()
+    assert messenger.sent == [] and messenger.updated == []
+    assert len(get_daily(factory)) == 2
+
+
+def test_deleted_slack_message_does_not_trigger_replacement_send(daily_system):
+    factory, _, messenger, clock, service = daily_system
+    add_student(factory)
+    service.run_due()
+    original = get_daily(factory)[0]
+    add_notice(factory)
+    messenger.error = ChecklistDeliveryError("message_not_found")
+    service.run_due()
+    clock[0] += timedelta(days=1)
+    service.run_due()
+    assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
+    assert get_daily(factory)[0].message_ts == original.message_ts
+    assert get_daily(factory)[0].last_error == "message_not_found"
+
+
+def test_reenrollment_starts_new_connection_but_old_message_cannot_change_it(daily_system):
+    factory, _, messenger, _, service = daily_system
+    student_id = add_student(factory)
+    add_notice(factory)
+    service.run_due()
+    original = get_daily(factory)[0]
+    with factory() as session, session.begin():
+        session.execute(delete(StudentModel).where(StudentModel.id == student_id))
+    add_student(factory)
+    service.run_due()
+    assert len(messenger.sent) == 2 and len(get_daily(factory)) == 1
+    assert get_daily(factory)[0].id != original.id
+    with pytest.raises(ChecklistActionError):
+        click(service, original, "refresh")
 
 
 def test_notice_analysis_changes_preserve_student_completion(daily_system):

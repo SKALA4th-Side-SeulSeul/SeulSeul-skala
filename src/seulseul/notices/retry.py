@@ -71,7 +71,7 @@ def run_command(service: NoticeService, args: argparse.Namespace) -> int:
     if notice.processing_status == "processed":
         print(
             "재처리 성공: 기존 공지의 분석 결과를 갱신했습니다. "
-            "실행 중인 봇이 당일 DM에 반영합니다."
+            "실행 중인 봇이 기존 체크리스트 DM에 반영합니다."
         )
         return 0
     print(f"재처리 실패: {_safe_error(notice.last_error)}")

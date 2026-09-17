@@ -8,8 +8,10 @@
 - 언어: Python 3.11
 - 학생 소속: Slack 성명(`profile.real_name`)의 `4기_광주_<1~4>반_<이름>`으로 판별 (D-021)
 - 실패 공지 복구: 운영자용 `python -m seulseul.notices.retry` CLI (사용법은 `README.md`, 정책은 D-022)
-- 학생 화면: 시작·해지 명령만 사용, 매일 서울 오전 9시 개인 DM과 당일 메시지 갱신·완료/취소 버튼 (D-023)
+- 원문 동기화: 수정·링크 추가/제거·삭제와 완료 상태 보존, `notice_sources`로 중복·역순 이벤트 방어 (D-024)
+- 학생 화면: 시작·해지 명령만 사용, 최초 연결 시 개인 DM 한 번 발송 후 같은 메시지 갱신 (D-025), 테두리 카드 묶음·굵은 짧은 제목 링크·📝 폼/📄 문서·작은 도메인/마감/원문·✓ 완료/↶ 취소, 하단 단일 목록 전환·새로고침·페이지 이동
 - 용어: `docs/PRODUCT.md`의 "용어"
+- 시작·해지의 기존 봇 개인 DM 정리: D-026. 시작 시 완료 기록 보존, 실패 시 갱신 중지 후 명령 재시도. `im:history` 권한 필요.
 
 ## 디렉터리 구조
 
@@ -60,7 +62,7 @@ tests/test_<domain>.py  # 도메인별 테스트
 - 코드 경계: `docs/ARCHITECTURE.md`
 - 제품 흐름과 용어: `docs/PRODUCT.md`
 - 현재 작업: `docs/PLANS.md`
-- 로컬·서버(Docker, PostgreSQL, Oracle Cloud) 작업: `docs/TODO.md`
+- 로컬·서버(Docker, PostgreSQL, Oracle Cloud) 작업: `docs/DB-TODO.md`
 
 ## 완료 기준
 
