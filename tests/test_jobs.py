@@ -4,13 +4,13 @@ from threading import Event
 from unittest.mock import Mock
 
 from seulseul.jobs.scheduler import ChecklistScheduler
-from seulseul.jobs.tasks import refresh_daily_checklists
+from seulseul.jobs.tasks import refresh_checklists
 
 
 def test_task_delegates_to_service() -> None:
     service = Mock()
     stop = Mock(return_value=False)
-    refresh_daily_checklists(service, stop)
+    refresh_checklists(service, stop)
     service.run_due.assert_called_once_with(stop)
 
 

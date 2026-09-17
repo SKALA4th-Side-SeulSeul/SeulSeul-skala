@@ -8,6 +8,9 @@ from __future__ import annotations
 import threading
 from collections import deque
 from collections.abc import Callable, Collection
+from dataclasses import replace
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Protocol, cast
 
 from sqlalchemy import select, update
@@ -15,8 +18,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from seulseul.ai.model import NoticeAnalysis
+from seulseul.checklists.repository import set_notice_checklists_deleted
 from seulseul.models import MAPPED_MODELS
-from seulseul.notices.model import Notice, NoticeModel, ProcessingStatus
+from seulseul.notices.events import NoticeMessageEvent
+from seulseul.notices.model import Notice, NoticeModel, NoticeSourceModel, ProcessingStatus
 
 _MAPPED_MODELS = MAPPED_MODELS
 
@@ -38,6 +43,16 @@ class NoticeRepository(Protocol):
 
     def replace_failed(self, original: Notice, result: Notice) -> bool: ...
 
+    def source_notices(
+        self, workspace_id: str, channel_id: str, message_ts: str
+    ) -> list[Notice]: ...
+
+    def begin_event(self, workspace_id: str, event: NoticeMessageEvent) -> bool: ...
+
+    def apply_event(
+        self, workspace_id: str, event: NoticeMessageEvent, notices: list[Notice]
+    ) -> list[Notice] | None: ...
+
 
 class InMemoryNoticeRepository:
     """DB 없이 도메인 동작을 검증할 때 사용하는 메모리 저장소."""
@@ -46,6 +61,7 @@ class InMemoryNoticeRepository:
         self._notices: deque[Notice] = deque(maxlen=max_stored_notices)
         self._canonical_urls: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
+        self._sources: dict[tuple[str, str, str], tuple[Decimal, bool, bool]] = {}
 
     def contains(self, workspace_id: str, canonical_url: str) -> bool:
         with self._lock:
@@ -98,6 +114,9 @@ class InMemoryNoticeRepository:
 
     def replace_failed(self, original: Notice, result: Notice) -> bool:
         with self._lock:
+            state = self._sources.get(_source_key(original))
+            if state is not None and (state[1] or not state[2]):
+                return False
             for index, notice in enumerate(self._notices):
                 if notice == original and notice.processing_status == "processing_failed":
                     if notice.deleted_at is not None:
@@ -105,6 +124,62 @@ class InMemoryNoticeRepository:
                     self._notices[index] = result
                     return True
             return False
+
+    def source_notices(self, workspace_id: str, channel_id: str, message_ts: str) -> list[Notice]:
+        with self._lock:
+            return [
+                n for n in self._notices if _source_key(n) == (workspace_id, channel_id, message_ts)
+            ]
+
+    def begin_event(self, workspace_id: str, event: NoticeMessageEvent) -> bool:
+        key = (workspace_id, event.channel_id, event.message_ts)
+        with self._lock:
+            state = self._sources.get(key)
+            if state is not None:
+                revision, deleted, applied = state
+                if revision > event.revision or (
+                    revision == event.revision
+                    and applied
+                    and not (event.kind == "deleted" and not deleted)
+                ):
+                    return False
+                if deleted and not (event.kind == "deleted" and revision == event.revision):
+                    return False
+            self._sources[key] = (event.revision, event.kind == "deleted", False)
+            return True
+
+    def apply_event(
+        self, workspace_id: str, event: NoticeMessageEvent, notices: list[Notice]
+    ) -> list[Notice] | None:
+        key = (workspace_id, event.channel_id, event.message_ts)
+        with self._lock:
+            if self._sources.get(key) != (event.revision, event.kind == "deleted", False):
+                return None
+            results = {n.canonical_url: n for n in notices}
+            changed = []
+            for index, original in enumerate(self._notices):
+                if _source_key(original) != key:
+                    continue
+                result = results.pop(original.canonical_url, None)
+                if result is None and original.deleted_at is None:
+                    result = replace(original, deleted_at=_event_time(event), next_retry_at=None)
+                if result is None:
+                    continue
+                if result != original:
+                    self._notices[index] = result
+                    changed.append(result)
+            for notice in results.values():
+                identity = (workspace_id, notice.canonical_url)
+                if identity in self._canonical_urls:
+                    continue
+                if len(self._notices) == self._notices.maxlen:
+                    removed = self._notices[-1]
+                    self._canonical_urls.discard((removed.workspace_id, removed.canonical_url))
+                self._notices.appendleft(notice)
+                self._canonical_urls.add(identity)
+                changed.append(notice)
+            self._sources[key] = (event.revision, event.kind == "deleted", True)
+            return changed
 
 
 class SqlAlchemyNoticeRepository:
@@ -173,6 +248,109 @@ class SqlAlchemyNoticeRepository:
             model = session.execute(statement).scalar_one_or_none()
             return _to_notice(model) if model is not None else None
 
+    def source_notices(self, workspace_id: str, channel_id: str, message_ts: str) -> list[Notice]:
+        with self._session_factory() as session:
+            models = (
+                session.execute(
+                    select(NoticeModel).where(
+                        NoticeModel.workspace_id == workspace_id,
+                        NoticeModel.channel_id == channel_id,
+                        NoticeModel.message_ts == message_ts,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [_to_notice(model) for model in models]
+
+    def begin_event(self, workspace_id: str, event: NoticeMessageEvent) -> bool:
+        key = (workspace_id, event.channel_id, event.message_ts)
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                insert(NoticeSourceModel)
+                .values(
+                    workspace_id=workspace_id,
+                    channel_id=event.channel_id,
+                    message_ts=event.message_ts,
+                    revision=event.revision,
+                    deleted=False,
+                    applied=False,
+                )
+                .on_conflict_do_nothing(index_elements=["workspace_id", "channel_id", "message_ts"])
+            )
+            source = session.get(NoticeSourceModel, key, with_for_update=True)
+            if source.revision > event.revision or (
+                source.revision == event.revision
+                and source.applied
+                and not (event.kind == "deleted" and not source.deleted)
+            ):
+                return False
+            if source.deleted and not (
+                event.kind == "deleted" and source.revision == event.revision
+            ):
+                return False
+            source.revision = event.revision
+            source.deleted = event.kind == "deleted"
+            source.applied = False
+            return True
+
+    def apply_event(
+        self, workspace_id: str, event: NoticeMessageEvent, notices: list[Notice]
+    ) -> list[Notice] | None:
+        key = (workspace_id, event.channel_id, event.message_ts)
+        with self._session_factory() as session, session.begin():
+            source = session.get(NoticeSourceModel, key, with_for_update=True)
+            if (
+                source is None
+                or source.revision != event.revision
+                or source.applied
+                or source.deleted != (event.kind == "deleted")
+            ):
+                return None
+            models = (
+                session.execute(
+                    select(NoticeModel)
+                    .where(
+                        NoticeModel.workspace_id == workspace_id,
+                        NoticeModel.channel_id == event.channel_id,
+                        NoticeModel.message_ts == event.message_ts,
+                    )
+                    .order_by(NoticeModel.canonical_url)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+            results = {n.canonical_url: n for n in notices}
+            changed = []
+            for model in models:
+                original = _to_notice(model)
+                result = results.pop(model.canonical_url, None)
+                if result is None:
+                    if model.deleted_at is not None:
+                        continue
+                    result = replace(original, deleted_at=_event_time(event), next_retry_at=None)
+                    set_notice_checklists_deleted(session, [model.id], result.deleted_at)
+                else:
+                    if result.processing_status == "processed" and result.deleted_at is None:
+                        set_notice_checklists_deleted(session, [model.id], None)
+                if result != original:
+                    for name, value in _notice_values(result).items():
+                        setattr(model, name, value)
+                    changed.append(result)
+            # 다른 원본의 중복 URL은 소유권을 옮기지 않는다. 경쟁도 UNIQUE로 방어한다.
+            for notice in sorted(results.values(), key=lambda n: n.canonical_url):
+                inserted = session.execute(
+                    insert(NoticeModel)
+                    .values(**_notice_values(notice))
+                    .on_conflict_do_nothing(index_elements=["workspace_id", "canonical_url"])
+                    .returning(NoticeModel.id)
+                ).scalar_one_or_none()
+                if inserted is not None:
+                    changed.append(notice)
+            source.applied = True
+            return changed
+
     def replace_failed(self, original: Notice, result: Notice) -> bool:
         # 분석 중 다른 요청이 성공했거나 원문·삭제 상태가 바뀌면 덮어쓰지 않는다.
         values = _notice_values(result)
@@ -204,9 +382,22 @@ class SqlAlchemyNoticeRepository:
             .returning(NoticeModel.id)
         )
         with self._session_factory() as session:
+            source = session.get(NoticeSourceModel, _source_key(original), with_for_update=True)
+            if source is not None and (source.deleted or not source.applied):
+                return False
             updated_id = session.execute(statement).scalar_one_or_none()
+            if updated_id is not None and result.processing_status == "processed":
+                set_notice_checklists_deleted(session, [updated_id], None)
             session.commit()
             return updated_id is not None
+
+
+def _source_key(notice: Notice) -> tuple[str, str, str]:
+    return notice.workspace_id, notice.channel_id, notice.message_ts
+
+
+def _event_time(event: NoticeMessageEvent) -> datetime:
+    return datetime.fromtimestamp(float(event.revision), timezone.utc)
 
 
 def _notice_values(notice: Notice) -> dict[str, object]:

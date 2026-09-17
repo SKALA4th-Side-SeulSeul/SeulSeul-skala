@@ -1,11 +1,12 @@
-"""체크리스트 배정·개인 상태와 일일 DM 전송 기록의 영속화."""
+"""체크리스트 배정·개인 상태와 최초 DM의 전송·갱신 기록을 저장한다."""
 
 import logging
 from collections.abc import Callable, Collection
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.orm import Session
 
 from seulseul.checklists.model import (
@@ -24,6 +25,18 @@ from seulseul.users.model import StudentModel
 PAGE_SIZE = 5
 LEASE_SECONDS = 180
 logger = logging.getLogger(__name__)
+
+
+def set_notice_checklists_deleted(
+    session: Session, notice_ids: Collection[UUID], deleted_at: datetime | None
+) -> None:
+    """원본 동기화 트랜잭션 안에서 삭제 상태만 바꾸고 완료 기록은 보존한다."""
+    if notice_ids:
+        session.execute(
+            update(ChecklistModel)
+            .where(ChecklistModel.notice_id.in_(notice_ids))
+            .values(deleted_at=deleted_at)
+        )
 
 
 def _aware(value: datetime) -> datetime:
@@ -56,11 +69,41 @@ class SqlAlchemyChecklistRepository:
     def recipient(self, workspace_id: str, user_id: str) -> ChecklistRecipient | None:
         return next((row for row in self.recipients(workspace_id) if row.user_id == user_id), None)
 
+    def reset_messages(self, workspace_id: str, user_id: str, *, finished: bool) -> None:
+        """삭제 도중 중단돼도 자동 재발송하지 않는다. 완료 기록은 변경하지 않는다."""
+        student_ids = select(StudentModel.id).where(
+            StudentModel.workspace_id == workspace_id, StudentModel.slack_user_id == user_id
+        )
+        with self._session_factory() as session, session.begin():
+            condition = DailyChecklistMessageModel.student_id.in_(student_ids)
+            if finished:
+                session.execute(delete(DailyChecklistMessageModel).where(condition))
+            else:
+                result = session.execute(
+                    update(DailyChecklistMessageModel)
+                    .where(condition)
+                    .values(
+                        status="uncertain",
+                        last_error="dm_cleanup_pending",
+                        lease_token=None,
+                        lease_until=None,
+                    )
+                )
+                student_id = session.scalar(student_ids)
+                if not result.rowcount and student_id is not None:
+                    session.add(
+                        DailyChecklistMessageModel(
+                            student_id=student_id,
+                            message_date=datetime.now(ZoneInfo("Asia/Seoul")).date(),
+                            status="uncertain",
+                            last_error="dm_cleanup_pending",
+                        )
+                    )
+
     def prepare_delivery(
         self,
         recipient: ChecklistRecipient,
         channels: Collection[str],
-        message_date: date | None,
         now: datetime,
     ) -> DeliveryClaim | None:
         """짧은 트랜잭션에서 배정·발송권 획득. Slack 호출 전에 커밋한다."""
@@ -78,11 +121,13 @@ class SqlAlchemyChecklistRepository:
             eligible = self._eligible(channels, now)
             notices = (
                 session.execute(
-                    select(NoticeModel.id).where(
+                    select(NoticeModel.id)
+                    .where(
                         NoticeModel.workspace_id == recipient.workspace_id,
                         NoticeModel.processing_status == "processed",
                         *eligible,
                     )
+                    .with_for_update(read=True)
                 )
                 .scalars()
                 .all()
@@ -103,24 +148,22 @@ class SqlAlchemyChecklistRepository:
             )
             session.flush()
 
-            if message_date is None:
-                return None
-
-            daily = session.execute(
-                select(DailyChecklistMessageModel)
-                .where(
-                    DailyChecklistMessageModel.student_id == recipient.id,
-                    DailyChecklistMessageModel.message_date == message_date,
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
+            daily = self._message_for_student(session, recipient.id)
             if daily is None:
                 daily = DailyChecklistMessageModel(
-                    student_id=recipient.id, message_date=message_date
+                    student_id=recipient.id,
+                    message_date=now.astimezone(ZoneInfo("Asia/Seoul")).date(),
                 )
                 session.add(daily)
                 session.flush()
             if daily.status == "uncertain":
+                return None
+            if bool(daily.dm_channel_id) != bool(daily.message_ts) or (
+                daily.status == "sent" and not daily.message_ts
+            ):
+                daily.status = "uncertain"
+                daily.last_error = "invalid_delivery_address"
+                logger.warning("DM 주소 불완전: delivery=%s 운영자 확인 필요", daily.id)
                 return None
             if daily.lease_until is not None and _aware(daily.lease_until) > now:
                 return None
@@ -168,7 +211,7 @@ class SqlAlchemyChecklistRepository:
             daily.page = min(daily.page, pages - 1)
             board = DailyChecklistBoard(
                 daily.id,
-                message_date,
+                daily.message_date,
                 tuple(visible[daily.page * PAGE_SIZE : (daily.page + 1) * PAGE_SIZE]),
                 pending_count,
                 completed_count,
@@ -190,6 +233,28 @@ class SqlAlchemyChecklistRepository:
                 daily.content_hash,
                 board,
             )
+
+    @staticmethod
+    def _message_for_student(
+        session: Session, student_id: UUID
+    ) -> DailyChecklistMessageModel | None:
+        """학생 잠금 아래 최초 발송 메시지를 선택한다. 과거 일일 기록은 삭제하지 않는다."""
+        model = DailyChecklistMessageModel
+        return session.execute(
+            select(model)
+            .where(model.student_id == student_id)
+            .order_by(
+                case(
+                    ((model.dm_channel_id.is_not(None)) & (model.message_ts.is_not(None)), 0),
+                    (model.status.in_(("sending", "uncertain")), 1),
+                    else_=2,
+                ),
+                model.message_date,
+                model.id,
+            )
+            .limit(1)
+            .with_for_update()
+        ).scalar_one_or_none()
 
     @staticmethod
     def _eligible(channels: Collection[str], now: datetime) -> tuple:
@@ -259,7 +324,6 @@ class SqlAlchemyChecklistRepository:
         message_ts: str,
         operation: str,
         item_id: UUID | None,
-        message_date: date,
         now: datetime,
     ) -> None:
         with self._session_factory() as session, session.begin():
@@ -277,21 +341,15 @@ class SqlAlchemyChecklistRepository:
                 raise ChecklistActionError(
                     "가입 정보가 바뀌었습니다. 최신 체크리스트를 확인해 주세요."
                 )
-            daily = session.execute(
-                select(DailyChecklistMessageModel)
-                .where(
-                    DailyChecklistMessageModel.id == daily_id,
-                    DailyChecklistMessageModel.student_id == student.id,
-                    DailyChecklistMessageModel.dm_channel_id == channel_id,
-                    DailyChecklistMessageModel.message_ts == message_ts,
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
-            if daily is None:
-                raise ChecklistActionError("본인에게 발송된 체크리스트에서만 변경할 수 있습니다.")
-            if daily.message_date != message_date:
+            daily = self._message_for_student(session, student.id)
+            if (
+                daily is None
+                or daily.id != daily_id
+                or daily.dm_channel_id != channel_id
+                or daily.message_ts != message_ts
+            ):
                 raise ChecklistActionError(
-                    "이전 날짜의 메시지입니다. 오늘의 체크리스트를 이용해 주세요."
+                    "현재 연결된 본인의 체크리스트에서만 변경할 수 있습니다."
                 )
             if operation in {"complete", "undo"}:
                 checklist = session.execute(

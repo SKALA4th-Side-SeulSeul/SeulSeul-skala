@@ -13,7 +13,7 @@ features:
     always_online: true
   slash_commands:
     - command: /seulseul
-      description: 매일 오전 9시 개인 체크리스트 알림을 시작하거나 해지합니다.
+      description: 개인 체크리스트 연동을 시작하거나 해지합니다.
       usage_hint: 시작 | 해지
       should_escape: false
 
@@ -26,6 +26,7 @@ oauth_config:
       - users:read
       - chat:write
       - im:write
+      - im:history
 
 settings:
   event_subscriptions:

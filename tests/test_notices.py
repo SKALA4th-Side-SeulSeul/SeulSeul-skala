@@ -4,20 +4,25 @@ import logging
 from argparse import Namespace
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal
+from importlib import import_module
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, select
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect, select
 from sqlalchemy.orm import sessionmaker
 
 from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
 from seulseul.config import AiSettings, ConfigError, DatabaseSettings, SlackSettings
 from seulseul.database import Base
-from seulseul.notices.model import Notice, NoticeModel
+from seulseul.notices.events import parse_notice_event
+from seulseul.notices.model import Notice, NoticeModel, NoticeSourceModel
 from seulseul.notices.repository import InMemoryNoticeRepository, SqlAlchemyNoticeRepository
 from seulseul.notices.retry import main as retry_main
 from seulseul.notices.retry import run_command
@@ -26,7 +31,6 @@ from seulseul.notices.service import (
     NoticeService,
     canonicalize_url,
     extract_notice_urls,
-    is_new_notice_message,
 )
 
 ALLOWED_CHANNEL = "C0000000001"
@@ -66,29 +70,6 @@ class FakeAnalyzer:
         )
 
 
-class FakeNoticeRepository:
-    def __init__(self) -> None:
-        self.notices: list[Notice] = []
-
-    def contains(self, workspace_id: str, canonical_url: str) -> bool:
-        return any(
-            notice.workspace_id == workspace_id and notice.canonical_url == canonical_url
-            for notice in self.notices
-        )
-
-    def add(self, notice: Notice) -> bool:
-        if self.contains(notice.workspace_id, notice.canonical_url):
-            return False
-        self.notices.append(notice)
-        return True
-
-    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
-        notices = reversed(self.notices)
-        if workspace_id is not None:
-            return [notice for notice in notices if notice.workspace_id == workspace_id][:limit]
-        return list(notices)[:limit]
-
-
 def record(service: NoticeService, event: dict[str, Any] | None = None) -> list[Notice]:
     return service.record_channel_message(
         event or channel_message(),
@@ -97,6 +78,375 @@ def record(service: NoticeService, event: dict[str, Any] | None = None) -> list[
         bot_user_id="USEULSEUL",
         bot_id="BSEULSEUL",
     )
+
+
+def changed_message(text: str, revision: str = "1789344100.000001", **overrides: Any) -> dict:
+    event = {
+        "type": "message",
+        "subtype": "message_changed",
+        "channel": ALLOWED_CHANNEL,
+        "ts": revision,
+        "event_ts": revision,
+        "message": {"ts": MESSAGE_TS, "user": "UWRITER", "text": text, "edited": {"ts": revision}},
+    }
+    event.update(overrides)
+    return event
+
+
+def deleted_message(revision: str = "1789344200.000001", **overrides: Any) -> dict:
+    event = {
+        "type": "message",
+        "subtype": "message_deleted",
+        "channel": ALLOWED_CHANNEL,
+        "ts": revision,
+        "event_ts": revision,
+        "deleted_ts": MESSAGE_TS,
+    }
+    event.update(overrides)
+    return event
+
+
+@pytest.fixture(params=["memory", "sql"])
+def notice_repository(request):
+    if request.param == "memory":
+        yield InMemoryNoticeRepository(50)
+    else:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        try:
+            yield SqlAlchemyNoticeRepository(sessionmaker(engine))
+        finally:
+            engine.dispose()
+
+
+@pytest.mark.parametrize("kind", ["changed", "deleted"])
+def test_parse_mutation_uses_original_identity_and_allows_missing_channel_type(kind):
+    payload = changed_message("수정") if kind == "changed" else deleted_message()
+    parsed = parse_notice_event(payload, {ALLOWED_CHANNEL}, "USEULSEUL")
+    assert parsed is not None and parsed.message_ts == MESSAGE_TS
+    assert parsed.kind == kind and parsed.revision == Decimal(payload["event_ts"])
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"channel": "COTHER"},
+        {"channel_type": "im"},
+        {"type": "reaction_added"},
+        {"message": None},
+        {"message": []},
+        {"message": {"ts": MESSAGE_TS}},
+        {"message": {"ts": MESSAGE_TS, "text": 123}},
+        {"message": {"ts": "NaN", "text": "안내"}},
+        {"message": {"ts": "999999999999.0", "text": "안내"}},
+        {"message": {"ts": MESSAGE_TS, "text": "안내", "thread_ts": "1.000001"}},
+        {"message": {"ts": MESSAGE_TS, "text": "안내", "user": "USEULSEUL"}},
+        {"message": {"ts": MESSAGE_TS, "text": "안내", "bot_id": "BSEULSEUL"}},
+    ],
+)
+def test_parse_mutation_rejects_malformed_out_of_scope_and_own_messages(overrides):
+    assert (
+        parse_notice_event(
+            changed_message("수정", **overrides), {ALLOWED_CHANNEL}, "USEULSEUL", "BSEULSEUL"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"deleted_ts": "invalid"},
+        {"event_ts": "NaN"},
+        {"event_ts": "1.000001"},
+        {"previous_message": "bad"},
+        {"previous_message": {"ts": "1.000001"}},
+        {"previous_message": {"ts": MESSAGE_TS, "thread_ts": "1.000001"}},
+        {"previous_message": {"ts": MESSAGE_TS, "bot_id": "BSEULSEUL"}},
+    ],
+)
+def test_parse_delete_rejects_invalid_identity_and_replies(overrides):
+    assert (
+        parse_notice_event(
+            deleted_message(**overrides), {ALLOWED_CHANNEL}, "USEULSEUL", "BSEULSEUL"
+        )
+        is None
+    )
+
+
+def test_other_bot_edit_and_private_channel_are_allowed():
+    payload = changed_message("안내", channel_type="group")
+    payload["message"].update(subtype="bot_message", bot_id="BOTHER")
+    assert parse_notice_event(payload, {ALLOWED_CHANNEL}, "USEULSEUL", "BSEULSEUL")
+
+
+def test_changed_notice_preserves_identity_and_reanalyzes_original_posted_time(notice_repository):
+    analyzer = FakeAnalyzer()
+    notify = MagicMock()
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository, on_change=notify
+    )
+    original = record(service)[0]
+    updated_analysis = replace(
+        original.analysis,
+        title="수정 과제",
+        summary="새 안내",
+        deadline_at=datetime(2026, 9, 22, 23, 59, tzinfo=SEOUL),
+    )
+    analyzer.analyze = MagicMock(return_value=updated_analysis)
+    text = "내용 수정 9월 20일까지 https://forms.example.test/task"
+    updated = record(service, changed_message(text))[0]
+    assert updated.message_ts == MESSAGE_TS
+    assert updated.canonical_url == original.canonical_url
+    assert updated.analysis.title == "수정 과제" and updated.text == text
+    assert updated.analysis.deadline_at == updated_analysis.deadline_at
+    analyzer.analyze.assert_called_once()
+    assert analyzer.analyze.call_args.args[2] == original.posted_at
+    assert len(service.recent_notices(10)) == 1 and notify.call_count == 2
+
+
+def test_link_change_adds_removes_and_restores_without_stealing_duplicates(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    original = record(service)[0]
+    other = record(
+        service,
+        channel_message(ts="1789344001.000100", text="다른 원문 https://forms.example.test/other"),
+    )[0]
+    record(service, changed_message("수정 https://docs.example.test/added " + other.original_url))
+    assert notice_repository.get(WORKSPACE_ID, original.canonical_url).deleted_at is not None
+    assert notice_repository.get(WORKSPACE_ID, other.canonical_url).message_ts == other.message_ts
+    assert {n.canonical_url for n in service.recent_notices(10)} == {
+        other.canonical_url,
+        "https://docs.example.test/added",
+    }
+    record(service, changed_message(original.text, "1789344300.000001"))
+    restored = notice_repository.get(WORKSPACE_ID, original.canonical_url)
+    assert restored.deleted_at is None and restored.processing_status == "processed"
+    assert notice_repository.get(WORKSPACE_ID, "https://docs.example.test/added").deleted_at
+
+
+@pytest.mark.parametrize("text", ["", "일반 안내 https://example.test/no-task"])
+def test_removing_all_links_deletes_without_ai_or_permalink(notice_repository, text):
+    analyzer = FakeAnalyzer()
+    notify = MagicMock()
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository, on_change=notify
+    )
+    original = record(service)[0]
+    original = notice_repository.get(WORKSPACE_ID, original.canonical_url)
+    result = service.record_channel_message(changed_message(text), workspace_id=WORKSPACE_ID)
+    assert result[0].deleted_at is not None and service.recent_notices(10) == []
+    assert len(analyzer.calls) == 1 and notify.call_count == 2
+    assert notice_repository.get(WORKSPACE_ID, original.canonical_url).analysis == original.analysis
+
+
+def test_failed_edit_keeps_analysis_stores_latest_source_and_supports_retry(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    original = record(service)[0]
+    original = notice_repository.get(WORKSPACE_ID, original.canonical_url)
+    analyzer.error = AiClientError("수정 분석 실패", retry_count=2)
+    text = "새 마감 안내 https://forms.example.test/task"
+    failed = record(service, changed_message(text))[0]
+    assert failed.analysis == original.analysis and failed.text == text
+    assert failed.processing_status == "processing_failed" and failed.last_error == "수정 분석 실패"
+    assert failed.deleted_at is None
+    analyzer.error = None
+    result = service.retry_failed_notice(WORKSPACE_ID, failed.original_url)
+    assert analyzer.calls[-1][0] == text and result.last_error is None
+
+
+def test_ai_disabled_edit_preserves_previously_displayed_analysis(notice_repository):
+    original = record(
+        NoticeService({ALLOWED_CHANNEL}, analyzer=FakeAnalyzer(), repository=notice_repository)
+    )[0]
+    original = notice_repository.get(WORKSPACE_ID, original.canonical_url)
+    disabled = NoticeService({ALLOWED_CHANNEL}, repository=notice_repository)
+    result = record(disabled, changed_message("다른 내용 " + original.original_url))[0]
+    assert result.analysis == original.analysis and result.processing_status == "processing_failed"
+    assert "AI_PROVIDER" in result.last_error
+
+
+def test_metadata_only_changes_and_repeated_events_do_not_reanalyze(notice_repository):
+    analyzer = FakeAnalyzer()
+    notify = MagicMock()
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository, on_change=notify
+    )
+    original = record(service)[0]
+    event = changed_message(original.text)
+    assert record(service, event) == []
+    assert record(service, event) == []
+    assert len(analyzer.calls) == 1 and notify.call_count == 1
+
+
+def test_delete_is_terminal_scoped_and_persisted_across_service_restart(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    original = record(service)[0]
+    foreign = service.record_channel_message(
+        channel_message(), workspace_id="TOTHER", source_permalink=PERMALINK
+    )[0]
+    record(service, deleted_message())
+    restarted = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    assert record(restarted) == []
+    assert record(restarted, changed_message(original.text, "1789344500.000001")) == []
+    assert record(restarted, deleted_message()) == []
+    assert notice_repository.get(WORKSPACE_ID, original.canonical_url).deleted_at
+    assert notice_repository.get("TOTHER", foreign.canonical_url).deleted_at is None
+    assert len(analyzer.calls) == 2
+
+
+def test_delete_before_create_leaves_tombstone_even_without_notice(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    assert record(service, deleted_message()) == []
+    assert record(service) == []
+    assert service.recent_notices(10) == [] and analyzer.calls == []
+
+
+def test_newer_edit_wins_and_older_creation_cannot_remove_added_links(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    latest = "최신 https://forms.example.test/latest"
+    record(service, changed_message(latest, "1789344400.000001"))
+    assert record(service, changed_message("오래된 https://forms.example.test/old")) == []
+    assert record(service) == []
+    assert service.recent_notices(10)[0].text == latest and len(analyzer.calls) == 1
+
+
+@pytest.mark.parametrize("mutation", ["delete", "newer_edit"])
+def test_in_flight_analysis_cannot_overwrite_newer_event(notice_repository, mutation):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    original = record(service)[0]
+    slow_text = "느린 변경 " + original.original_url
+    latest_text = "최신 변경 " + original.original_url
+    delegate = analyzer.analyze
+
+    def analyze(text, url, posted_at):
+        if text == slow_text:
+            event = (
+                deleted_message()
+                if mutation == "delete"
+                else changed_message(latest_text, "1789344500.000001")
+            )
+            record(service, event)
+        return delegate(text, url, posted_at)
+
+    analyzer.analyze = analyze
+    assert record(service, changed_message(slow_text)) == []
+    latest = notice_repository.get(WORKSPACE_ID, original.canonical_url)
+    if mutation == "delete":
+        assert latest.deleted_at is not None
+    else:
+        assert latest.text == latest_text
+
+
+def test_retry_during_pending_edit_is_rejected(notice_repository):
+    original = failed_notice()
+    notice_repository.add(original)
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=FakeAnalyzer(), repository=notice_repository
+    )
+    event = service.parse_event(changed_message("변경 " + original.original_url), None)
+    assert notice_repository.begin_event(WORKSPACE_ID, event)
+    with pytest.raises(NoticeRetryError, match="상태가 변경"):
+        service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+
+
+def test_sql_source_state_survives_repository_recreation():
+    engine = create_engine("sqlite://")
+    try:
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(engine)
+        service = NoticeService({ALLOWED_CHANNEL}, repository=SqlAlchemyNoticeRepository(factory))
+        record(service, deleted_message())
+        restarted = NoticeService({ALLOWED_CHANNEL}, repository=SqlAlchemyNoticeRepository(factory))
+        assert record(restarted) == []
+        with factory() as session:
+            source = session.get(NoticeSourceModel, (WORKSPACE_ID, ALLOWED_CHANNEL, MESSAGE_TS))
+            assert source.deleted and source.applied
+            assert source.revision == Decimal("1789344200.000001")
+    finally:
+        engine.dispose()
+
+
+def test_deletion_wins_same_revision_even_if_edit_analysis_is_pending(notice_repository):
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=FakeAnalyzer(), repository=notice_repository
+    )
+    original = record(service)[0]
+    edit = service.parse_event(changed_message("수정 " + original.original_url), None)
+    assert notice_repository.begin_event(WORKSPACE_ID, edit)
+    deletion = service.parse_event(deleted_message("1789344100.000001"), None)
+    assert notice_repository.begin_event(WORKSPACE_ID, deletion)
+    assert notice_repository.apply_event(WORKSPACE_ID, edit, [original]) is None
+    assert notice_repository.apply_event(WORKSPACE_ID, deletion, [])[0].deleted_at is not None
+
+
+def test_failed_transaction_can_replay_same_event_without_partial_changes(monkeypatch):
+    engine = create_engine("sqlite://")
+    try:
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(engine)
+        repository = SqlAlchemyNoticeRepository(factory)
+        service = NoticeService({ALLOWED_CHANNEL}, analyzer=FakeAnalyzer(), repository=repository)
+        original = record(service)[0]
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                "seulseul.notices.repository.set_notice_checklists_deleted",
+                MagicMock(side_effect=RuntimeError("DB failure")),
+            )
+            with pytest.raises(RuntimeError, match="DB failure"):
+                record(service, deleted_message())
+        assert repository.get(WORKSPACE_ID, original.canonical_url).deleted_at is None
+        assert record(service, deleted_message())[0].deleted_at is not None
+    finally:
+        engine.dispose()
+
+
+def test_source_migration_preserves_existing_notices_and_backfills_once():
+    migration = import_module("migrations.versions.c83021fb573d_공지_원본_이벤트_상태")
+    engine = create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            Base.metadata.create_all(
+                connection,
+                tables=[
+                    table for table in Base.metadata.sorted_tables if table.name != "notice_sources"
+                ],
+            )
+            connection.execute(
+                NoticeModel.__table__.insert(),
+                [
+                    {
+                        "workspace_id": WORKSPACE_ID,
+                        "channel_id": ALLOWED_CHANNEL,
+                        "message_ts": MESSAGE_TS,
+                        "source_text": "기존 원문",
+                        "original_url": f"https://forms.example.test/{suffix}",
+                        "canonical_url": f"https://forms.example.test/{suffix}",
+                        "source_permalink": PERMALINK,
+                        "posted_at": datetime(2026, 9, 14),
+                        "processing_status": "ai_disabled",
+                    }
+                    for suffix in ("one", "two")
+                ],
+            )
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.upgrade()
+            sources = connection.execute(select(NoticeSourceModel.__table__)).mappings().all()
+            assert len(sources) == 1 and sources[0]["applied"] and not sources[0]["deleted"]
+            assert sources[0]["revision"] == Decimal(MESSAGE_TS)
+            assert len(connection.execute(select(NoticeModel.id)).all()) == 2
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.downgrade()
+            assert "notice_sources" not in inspect(connection).get_table_names()
+            assert len(connection.execute(select(NoticeModel.id)).all()) == 2
+    finally:
+        engine.dispose()
 
 
 def test_extract_notice_urls_supports_form_and_docs_links_only() -> None:
@@ -123,7 +473,7 @@ def test_canonicalize_url_removes_query_fragment_and_trailing_slash() -> None:
 def test_message_must_be_in_configured_channel() -> None:
     event = channel_message(channel="C9999999999")
 
-    assert not is_new_notice_message(event, {ALLOWED_CHANNEL}, "USEULSEUL")
+    assert parse_notice_event(event, {ALLOWED_CHANNEL}, "USEULSEUL") is None
     assert record(NoticeService({ALLOWED_CHANNEL}), event) == []
 
 
@@ -132,15 +482,15 @@ def test_thread_reply_and_own_bot_message_are_excluded() -> None:
     own_user_message = channel_message(subtype="bot_message", user="USEULSEUL")
     own_bot_message = channel_message(subtype="bot_message", user=None, bot_id="BSEULSEUL")
 
-    assert not is_new_notice_message(thread_reply, {ALLOWED_CHANNEL}, "USEULSEUL")
-    assert not is_new_notice_message(own_user_message, {ALLOWED_CHANNEL}, "USEULSEUL")
-    assert not is_new_notice_message(own_bot_message, {ALLOWED_CHANNEL}, "USEULSEUL", "BSEULSEUL")
+    assert parse_notice_event(thread_reply, {ALLOWED_CHANNEL}, "USEULSEUL") is None
+    assert parse_notice_event(own_user_message, {ALLOWED_CHANNEL}, "USEULSEUL") is None
+    assert parse_notice_event(own_bot_message, {ALLOWED_CHANNEL}, "USEULSEUL", "BSEULSEUL") is None
 
 
 def test_other_bot_message_is_allowed() -> None:
     event = channel_message(subtype="bot_message", user="UOTHERBOT", bot_id="BOTHER")
 
-    assert is_new_notice_message(event, {ALLOWED_CHANNEL}, "USEULSEUL")
+    assert parse_notice_event(event, {ALLOWED_CHANNEL}, "USEULSEUL").kind == "created"
 
 
 def test_message_without_matching_url_is_ignored() -> None:
@@ -189,14 +539,40 @@ def test_canonical_duplicate_link_is_ignored() -> None:
     assert len(service.recent_notices(5)) == 1
 
 
+def test_similar_surveys_with_distinct_links_are_both_collected(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=notice_repository)
+    for ts, course, link, deadline in [
+        (MESSAGE_TS, "모델 개발", "https://forms.example.test/model", "9/27(일)"),
+        ("1789344001.000100", "스프링 개발", "https://forms.example.test/spring", "9/26(토)"),
+    ]:
+        results = record(
+            service,
+            channel_message(
+                ts=ts,
+                text=(
+                    f"<!here> {course} 교과목 종료 서베이 <{link}>에 참여해주세요!\n"
+                    f"※ 서베이는 익명으로 진행됩니다.\n※ 마감일 : ~{deadline}"
+                ),
+            ),
+        )
+        assert len(results) == 1 and results[0].original_url == link
+        assert results[0].processing_status == "processed"
+    assert len(analyzer.calls) == 2
+    assert {notice.canonical_url for notice in service.recent_notices(5)} == {
+        "https://forms.example.test/model",
+        "https://forms.example.test/spring",
+    }
+
+
 def test_repository_keeps_duplicate_detection_across_service_instances() -> None:
-    repository = FakeNoticeRepository()
+    repository = InMemoryNoticeRepository(10)
     first_service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
     restarted_service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
 
     assert len(record(first_service)) == 1
     assert record(restarted_service, channel_message(ts="1789344001.000100")) == []
-    assert len(repository.notices) == 1
+    assert len(repository.recent(10)) == 1
 
 
 def test_ai_failure_is_classified_without_logging_notice_text(
@@ -216,15 +592,15 @@ def test_ai_failure_is_classified_without_logging_notice_text(
 
 
 def test_ai_retry_count_is_passed_to_repository() -> None:
-    repository = FakeNoticeRepository()
+    repository = InMemoryNoticeRepository(10)
     analyzer = FakeAnalyzer(AiClientError("AI 서버 오류", retry_count=2))
     service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
 
     record(service)
 
-    assert repository.notices[0].processing_status == "processing_failed"
-    assert repository.notices[0].retry_count == 2
-    assert repository.notices[0].last_error == "AI 서버 오류"
+    assert repository.recent(10)[0].processing_status == "processing_failed"
+    assert repository.recent(10)[0].retry_count == 2
+    assert repository.recent(10)[0].last_error == "AI 서버 오류"
 
 
 def test_recent_notices_are_newest_first_and_bounded() -> None:
@@ -583,6 +959,7 @@ def test_sqlalchemy_retry_updates_same_row_and_rejects_stale_failure() -> None:
 def test_sqlalchemy_retry_update_is_scoped_and_preserves_source() -> None:
     session = MagicMock()
     session.__enter__.return_value = session
+    session.get.return_value = None
     session.execute.return_value.scalar_one_or_none.return_value = uuid4()
     repository = SqlAlchemyNoticeRepository(lambda: session)
     original = failed_notice()

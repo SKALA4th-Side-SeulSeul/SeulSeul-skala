@@ -29,7 +29,7 @@ from seulseul.config import (
 )
 from seulseul.database import create_database_engine, create_session_factory
 from seulseul.jobs.scheduler import ChecklistScheduler
-from seulseul.jobs.tasks import refresh_daily_checklists
+from seulseul.jobs.tasks import refresh_checklists
 from seulseul.notices.repository import NoticeRepository, SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import SlackChecklistClient
@@ -109,8 +109,6 @@ def main() -> None:
         notice_repository,
         (wakeup := Event()).set,
     )
-    student_service = StudentService(student_repository, on_change=wakeup.set)
-    app = create_app(slack_settings, notice_service, student_service)
     messenger = SlackChecklistClient.from_token(slack_settings.bot_token)
     checklist_service = DailyChecklistService(
         SqlAlchemyChecklistRepository(session_factory),
@@ -119,9 +117,13 @@ def main() -> None:
         notice_targets,
         notify=wakeup.set,
     )
+    student_service = StudentService(
+        student_repository, on_change=wakeup.set, reset_messages=checklist_service.reset_messages
+    )
+    app = create_app(slack_settings, notice_service, student_service)
     register_checklist_handlers(app, checklist_service)
     scheduler = ChecklistScheduler(
-        lambda: refresh_daily_checklists(checklist_service, scheduler.stopped.is_set),
+        lambda: refresh_checklists(checklist_service, scheduler.stopped.is_set),
         wakeup,
     )
     logger.info(

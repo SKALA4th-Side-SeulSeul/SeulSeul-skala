@@ -1,14 +1,15 @@
-"""개인별 일일 체크리스트와 전송·상태 변경 업무 규칙."""
+"""개인별 최초 체크리스트 전송과 같은 메시지의 갱신·상태 변경 업무 규칙."""
 
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Protocol
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from seulseul.checklists.model import (
     ChecklistActionError,
@@ -19,17 +20,20 @@ from seulseul.checklists.model import (
 from seulseul.checklists.repository import SqlAlchemyChecklistRepository
 
 logger = logging.getLogger(__name__)
-SEOUL = ZoneInfo("Asia/Seoul")
+# 문구·서식만 바뀌어도 기존 DM에 한 번 반영한다.
+BOARD_PRESENTATION_VERSION = 9
 
 
 class ChecklistMessenger(Protocol):
     def send(self, user_id: str, board: DailyChecklistBoard) -> tuple[str, str]: ...
     def update(self, channel_id: str, message_ts: str, board: DailyChecklistBoard) -> None: ...
+    def delete_previous_messages(self, workspace_id: str, user_id: str) -> None: ...
 
 
 def board_hash(board: DailyChecklistBoard) -> str:
     content = asdict(board)
     content.pop("refreshed_at")
+    content["presentation_version"] = BOARD_PRESENTATION_VERSION
     return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -50,6 +54,18 @@ class DailyChecklistService:
         self._targets = dict(targets)
         self._clock = clock
         self._notify = notify
+        # 단일 봇 프로세스에서 명령과 스케줄러의 Slack 호출까지 직렬화한다.
+        self._delivery_lock = RLock()
+
+    @contextmanager
+    def reset_messages(self, workspace_id: str, user_id: str) -> Iterator[None]:
+        if workspace_id != self._workspace_id:
+            raise ChecklistDeliveryError("invalid_workspace")
+        with self._delivery_lock:
+            self._repository.reset_messages(workspace_id, user_id, finished=False)
+            self._messenger.delete_previous_messages(workspace_id, user_id)
+            yield
+            self._repository.reset_messages(workspace_id, user_id, finished=True)
 
     def _channels(self, recipient: ChecklistRecipient) -> tuple[str, ...]:
         return tuple(
@@ -66,15 +82,15 @@ class DailyChecklistService:
                 self._synchronize(recipient)
             except Exception as error:
                 # 사용자 본문/토큰을 포함할 수 있는 예외 문자열은 로그에 남기지 않는다.
-                logger.error("일일 체크리스트 동기화 오류: type=%s", type(error).__name__)
+                logger.error("개인 체크리스트 동기화 오류: type=%s", type(error).__name__)
 
     def _synchronize(self, recipient: ChecklistRecipient) -> bool:
+        with self._delivery_lock:
+            return self._synchronize_locked(recipient)
+
+    def _synchronize_locked(self, recipient: ChecklistRecipient) -> bool:
         now = self._clock().astimezone(timezone.utc)
-        local = now.astimezone(SEOUL)
-        message_date = local.date() if local.hour >= 9 else None
-        claim = self._repository.prepare_delivery(
-            recipient, self._channels(recipient), message_date, now
-        )
+        claim = self._repository.prepare_delivery(recipient, self._channels(recipient), now)
         if claim is None:
             return False
         fingerprint = board_hash(claim.board)
@@ -87,7 +103,7 @@ class DailyChecklistService:
                 channel, ts = self._messenger.send(recipient.user_id, claim.board)
         except ChecklistDeliveryError as error:
             self._repository.fail_delivery(claim, error, self._clock())
-            logger.warning("일일 DM 갱신 실패: delivery=%s code=%s", claim.board.id, error.code)
+            logger.warning("개인 DM 갱신 실패: delivery=%s code=%s", claim.board.id, error.code)
             return False
         self._repository.finish_delivery(claim, fingerprint, channel, ts)
         return True
@@ -101,12 +117,23 @@ class DailyChecklistService:
         operation: str,
         value: str,
     ) -> bool:
+        with self._delivery_lock:
+            return self._handle_action_locked(
+                workspace_id, user_id, channel_id, message_ts, operation, value
+            )
+
+    def _handle_action_locked(
+        self,
+        workspace_id: str,
+        user_id: str,
+        channel_id: str,
+        message_ts: str,
+        operation: str,
+        value: str,
+    ) -> bool:
         if workspace_id != self._workspace_id:
             raise ChecklistActionError("이 워크스페이스의 체크리스트가 아닙니다.")
         now = self._clock().astimezone(timezone.utc)
-        local = now.astimezone(SEOUL)
-        if local.hour < 9:
-            raise ChecklistActionError("오늘 체크리스트는 오전 9시에 도착합니다.")
         try:
             payload = json.loads(value)
             daily_id = UUID(payload["daily"])
@@ -126,7 +153,6 @@ class DailyChecklistService:
             message_ts,
             operation,
             item_id,
-            local.date(),
             now,
         )
         self._notify()

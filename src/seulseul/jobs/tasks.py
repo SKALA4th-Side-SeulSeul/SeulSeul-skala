@@ -5,7 +5,7 @@ from collections.abc import Callable
 from seulseul.checklists.service import DailyChecklistService
 
 
-def refresh_daily_checklists(
+def refresh_checklists(
     service: DailyChecklistService,
     should_stop: Callable[[], bool] = lambda: False,
 ) -> None:

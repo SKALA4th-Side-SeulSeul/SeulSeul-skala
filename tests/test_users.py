@@ -1,5 +1,6 @@
 """학생 ORM 모델의 식별자와 소속 제약을 확인한다."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -17,6 +18,28 @@ from seulseul.users.service import (
 
 WORKSPACE_ID = "T0000000001"
 USER_ID = "U0000000001"
+
+
+def test_commands_cleanup_inside_guard_and_invalid_profile_does_not_delete():
+    repository = InMemoryStudentRepository()
+    calls = []
+
+    @contextmanager
+    def reset(workspace, user):
+        calls.append((workspace, user, "before"))
+        yield
+        calls.append((workspace, user, "after"))
+
+    service = StudentService(repository, reset_messages=reset)
+    with pytest.raises(InvalidStudentRealNameError):
+        service.enroll(WORKSPACE_ID, USER_ID, "invalid")
+    assert not calls
+    service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_가상학생")
+    service.withdraw(WORKSPACE_ID, USER_ID)
+    service.withdraw(WORKSPACE_ID, USER_ID)
+    assert calls == [
+        (WORKSPACE_ID, USER_ID, phase) for _ in range(3) for phase in ("before", "after")
+    ]
 
 
 def test_student_model_has_workspace_user_identity_and_affiliation() -> None:

@@ -11,14 +11,13 @@ from zoneinfo import ZoneInfo
 
 from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
+from seulseul.notices.events import NoticeMessageEvent, parse_notice_event
 from seulseul.notices.model import Notice
 from seulseul.notices.repository import InMemoryNoticeRepository, NoticeRepository
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_STORED_NOTICES = 50
-NOTICE_CHANNEL_TYPES = frozenset({"channel", "group"})
-PROCESSABLE_BOT_SUBTYPE = "bot_message"
 NOTICE_URL_KEYWORDS = ("form", "docs")
 URL_PATTERN = re.compile(r"https?://[^\s<>|]+", re.IGNORECASE)
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
@@ -33,41 +32,18 @@ class NoticeRetryError(Exception):
     """선택한 공지를 재처리할 수 없을 때 발생한다."""
 
 
-def is_new_notice_message(
-    event: Mapping[str, Any],
-    allowed_channel_ids: Collection[str],
-    bot_user_id: str | None,
-    bot_id: str | None = None,
-) -> bool:
-    """설정 채널에서 받은 새 최상위 메시지인지 판단한다."""
-    subtype = event.get("subtype")
-    if subtype not in (None, PROCESSABLE_BOT_SUBTYPE):
-        return False
-    if (bot_user_id and event.get("user") == bot_user_id) or (
-        bot_id and event.get("bot_id") == bot_id
-    ):
-        return False
-    if event.get("channel_type") not in NOTICE_CHANNEL_TYPES:
-        return False
-    if event.get("channel") not in allowed_channel_ids:
-        return False
-    thread_ts = event.get("thread_ts")
-    if thread_ts is not None and thread_ts != event.get("ts"):
-        return False
-    return (
-        bool(event.get("channel"))
-        and bool(event.get("ts"))
-        and bool(str(event.get("text") or "").strip())
-    )
-
-
 def extract_notice_urls(text: str) -> tuple[tuple[str, str], ...]:
     """원문에서 처리 대상 URL과 canonical URL 쌍을 원래 순서대로 반환한다."""
     links: list[tuple[str, str]] = []
     seen: set[str] = set()
     for match in URL_PATTERN.finditer(text):
         original_url = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
-        parsed = urlsplit(original_url)
+        try:
+            parsed = urlsplit(original_url)
+            if not parsed.hostname:
+                continue
+        except ValueError:
+            continue
         searchable_part = f"{parsed.hostname or ''}{parsed.path}".lower()
         if not any(keyword in searchable_part for keyword in NOTICE_URL_KEYWORDS):
             continue
@@ -106,58 +82,94 @@ class NoticeService:
         self._repository = repository or InMemoryNoticeRepository(max_stored_notices)
         self._on_change = on_change
 
-    def accepts_message(
-        self,
-        event: Mapping[str, Any],
-        bot_user_id: str | None,
-        bot_id: str | None = None,
-    ) -> bool:
-        return is_new_notice_message(
-            event, self._allowed_channel_ids, bot_user_id, bot_id
-        ) and bool(extract_notice_urls(str(event.get("text") or "")))
+    def parse_event(
+        self, event: Mapping[str, Any], bot_user_id: str | None, bot_id: str | None = None
+    ) -> NoticeMessageEvent | None:
+        parsed = parse_notice_event(event, self._allowed_channel_ids, bot_user_id, bot_id)
+        if parsed is not None and parsed.kind == "created" and not extract_notice_urls(parsed.text):
+            return None
+        return parsed
+
+    def stored_permalink(self, workspace_id: str, event: NoticeMessageEvent) -> str | None:
+        notices = self._repository.source_notices(workspace_id, event.channel_id, event.message_ts)
+        return notices[0].source_permalink if notices else None
+
+    @staticmethod
+    def needs_permalink(event: NoticeMessageEvent) -> bool:
+        return event.kind != "deleted" and bool(extract_notice_urls(event.text))
 
     def record_channel_message(
         self,
         event: Mapping[str, Any],
         *,
         workspace_id: str,
-        source_permalink: str,
+        source_permalink: str = "",
         bot_user_id: str | None = None,
         bot_id: str | None = None,
     ) -> list[Notice]:
-        """처리 가능한 링크마다 공지를 하나씩 만들고 중복 링크는 건너뛴다."""
-        if not workspace_id or not source_permalink:
-            raise ValueError("workspace_id와 source_permalink는 비어 있을 수 없습니다.")
-        if not is_new_notice_message(event, self._allowed_channel_ids, bot_user_id, bot_id):
+        """최신 원본 이벤트만 적용하고 링크별 공지·체크리스트를 함께 동기화한다."""
+        parsed = self.parse_event(event, bot_user_id, bot_id)
+        if parsed is None:
             return []
-
-        channel_id = str(event["channel"])
-        message_ts = str(event["ts"])
-        text = str(event["text"]).strip()
-        posted_at = datetime.fromtimestamp(float(message_ts), timezone.utc).astimezone(
+        if not workspace_id or (self.needs_permalink(parsed) and not source_permalink):
+            raise ValueError("workspace_id와 source_permalink는 비어 있을 수 없습니다.")
+        if not self._repository.begin_event(workspace_id, parsed):
+            return []
+        originals = {
+            notice.canonical_url: notice
+            for notice in self._repository.source_notices(
+                workspace_id, parsed.channel_id, parsed.message_ts
+            )
+        }
+        posted_at = datetime.fromtimestamp(float(parsed.message_ts), timezone.utc).astimezone(
             SEOUL_TIMEZONE
         )
-        created: list[Notice] = []
-
-        for original_url, canonical_url in extract_notice_urls(text):
-            if self._repository.contains(workspace_id, canonical_url):
+        results = []
+        for original_url, canonical_url in extract_notice_urls(parsed.text):
+            original = originals.get(canonical_url)
+            if original is None and self._repository.contains(workspace_id, canonical_url):
+                # 같은 링크가 다른 원본에 있으면 그 공지를 변경하지 않는다.
                 continue
-
-            notice = self._build_notice(
+            if original is not None and (
+                parsed.kind == "created"
+                or (
+                    original.deleted_at is None
+                    and original.text == parsed.text
+                    and original.original_url == original_url
+                )
+            ):
+                results.append(original)
+                continue
+            analyzed = self._build_notice(
                 workspace_id=workspace_id,
-                channel_id=channel_id,
-                message_ts=message_ts,
-                text=text,
+                channel_id=parsed.channel_id,
+                message_ts=parsed.message_ts,
+                text=parsed.text,
                 original_url=original_url,
                 canonical_url=canonical_url,
                 source_permalink=source_permalink,
                 posted_at=posted_at,
             )
-            if self._repository.add(notice):
-                created.append(notice)
-                if notice.processing_status == "processed":
-                    self._on_change()
-        return created
+            if (
+                analyzed.processing_status != "processed"
+                and original is not None
+                and original.deleted_at is None
+                and original.analysis is not None
+            ):
+                # 유지 링크는 마지막 성공 분석을 보존한다. 제거 후 재추가한 링크는
+                # 새 분석이 성공하기 전까지 예전 분석으로 복구하지 않는다.
+                analyzed = replace(
+                    analyzed,
+                    analysis=original.analysis,
+                    processing_status="processing_failed",
+                    last_error=analyzed.last_error
+                    or "AI_PROVIDER가 비어 있어 수정 내용을 분석하지 못했습니다.",
+                )
+            results.append(analyzed)
+        changed = self._repository.apply_event(workspace_id, parsed, results)
+        if changed and any(n.processing_status == "processed" or n.deleted_at for n in changed):
+            self._on_change()
+        return changed or []
 
     def recent_notices(self, limit: int, *, workspace_id: str | None = None) -> list[Notice]:
         if limit < 1:
