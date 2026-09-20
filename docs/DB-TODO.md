@@ -107,6 +107,10 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 
 ## 2. 서버 (Oracle Cloud)
 
+### 운영 간편 명령
+
+루트의 `run.sh`, `stop.sh`, `view.sh`를 사용합니다. 상세 옵션과 최초 설치·업데이트 순서는 `README.md`의 "운영 서버 간편 명령"을 따릅니다. `run.sh`는 빌드 후 봇 중지·DB 준비·마이그레이션·봇 재생성 순서이고, `stop.sh`는 DB 볼륨을 삭제하지 않습니다. Docker 데몬 설치·설정과 방화벽 변경은 수행하지 않습니다. 최초 적용 후 서버에서 실행·중지·로그 조회를 확인해야 합니다.
+
 ### 2-1. 서버 확인과 OS
 
 - [x] 사양 확인: `aarch64`, CPU 1개, 메모리 17GiB, 디스크 45GB
