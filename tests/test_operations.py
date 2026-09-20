@@ -1,5 +1,6 @@
 """가짜 Docker로 운영 셸의 인자·실행 순서·안전한 실패를 검증한다."""
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -22,7 +23,14 @@ def operations(tmp_path, monkeypatch):
     repo = tmp_path / "app with spaces"
     repo.mkdir()
     (repo / "scripts").mkdir()
-    for name in ("run.sh", "stop.sh", "view.sh", "scripts/operations.sh", ".env.example"):
+    for name in (
+        "run.sh",
+        "stop.sh",
+        "view.sh",
+        "backup.sh",
+        "scripts/operations.sh",
+        ".env.example",
+    ):
         shutil.copyfile(ROOT / name, repo / name)
     (repo / ".env").write_text("SECRET=never_print_this\n")
     binaries = tmp_path / "bin"
@@ -38,6 +46,12 @@ fi
 if [[ -f fail-step ]]; then
     read -r fail < fail-step
     if [[ "$*" == *"$fail"* ]]; then exit 17; fi
+fi
+if [[ "$*" == *'exec pg_dump '* ]]; then
+    if [[ ! -f empty-dump ]]; then printf 'fake-custom-archive'; fi
+fi
+if [[ "$*" == *'pg_restore --file=/dev/null'* ]]; then
+    cat >/dev/null
 fi
 """
     )
@@ -160,3 +174,56 @@ def test_partial_run_does_not_start_bot(operations, operation):
     assert run("run.sh", operation).returncode == 0
     assert not any("--force-recreate" in call for call in calls())
     assert any(call.endswith("run --rm migrate") for call in calls()) == (operation == "migrate")
+
+
+def test_backup_creates_private_verified_archive_without_stopping_services(operations):
+    repo, run, calls = operations
+    result = run("backup.sh")
+    assert result.returncode == 0, result.stderr
+    destination = repo.parent / "backups"
+    archives = list(destination.glob("*/database.dump"))
+    assert len(archives) == 1 and archives[0].read_bytes() == b"fake-custom-archive"
+    assert destination.stat().st_mode & 0o777 == 0o700
+    assert archives[0].stat().st_mode & 0o777 == 0o600
+    assert (archives[0].parent / "SHA256SUMS").is_file()
+    assert (archives[0].parent / "SHA256SUMS").read_text().strip() == (
+        hashlib.sha256(archives[0].read_bytes()).hexdigest() + "  database.dump"
+    )
+    assert not list(destination.glob("*/*.partial"))
+    steps = calls()
+    assert "exec pg_dump" in steps[-2]
+    assert "-T postgres" in steps[-2]
+    assert steps[-1].endswith("pg_restore --file=/dev/null")
+    assert not any(" stop " in line or " down" in line or " run " in line for line in steps)
+    assert "never_print_this" not in result.stdout + result.stderr
+    assert run("backup.sh").returncode == 0
+    assert len(list(destination.glob("*/database.dump"))) == 2
+
+
+@pytest.mark.parametrize("failure", ["exec pg_dump", "pg_restore --file=/dev/null", "empty"])
+def test_backup_failure_removes_only_current_partial_files(operations, failure):
+    repo, run, _ = operations
+    destination = repo.parent / "backups"
+    destination.mkdir()
+    previous = destination / "previous.dump"
+    previous.write_text("keep")
+    if failure == "empty":
+        (repo / "empty-dump").touch()
+    else:
+        (repo / "fail-step").write_text(failure + "\n")
+    result = run("backup.sh")
+    assert result.returncode != 0
+    assert "백업 완료:" not in result.stdout
+    assert list(destination.iterdir()) == [previous]
+    assert previous.read_text() == "keep"
+
+
+def test_backup_rejects_symlink_destination_and_unknown_option(operations):
+    repo, run, calls = operations
+    (repo.parent / "backups").symlink_to(repo, target_is_directory=True)
+    assert run("backup.sh").returncode != 0
+    assert not any("exec pg_dump" in line for line in calls())
+    count = len(calls())
+    assert run("backup.sh", "--delete").returncode == 2
+    assert run("backup.sh", "--help").returncode == 0
+    assert len(calls()) == count

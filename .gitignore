@@ -12,3 +12,8 @@ CLAUDE.local.md
 .claude/settings.local.json
 AGENTS.override.md
 *.egg-info/
+
+# DB 백업·덤프에는 개인정보가 포함될 수 있다.
+backups/
+*.dump
+*.dump.partial
