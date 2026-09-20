@@ -60,6 +60,10 @@ def run_command(service: NoticeService, args: argparse.Namespace) -> int:
                         notice.workspace_id,
                         "--url",
                         notice.original_url,
+                        "--channel-id",
+                        notice.channel_id,
+                        "--message-ts",
+                        notice.message_ts,
                     ]
                 )
             )
@@ -67,7 +71,12 @@ def run_command(service: NoticeService, args: argparse.Namespace) -> int:
             print("조회 한도에 도달했습니다. --limit 또는 --workspace-id로 범위를 조정하세요.")
         return 0
 
-    notice = service.retry_failed_notice(args.workspace_id, args.url)
+    notice = service.retry_failed_notice(
+        args.workspace_id,
+        args.url,
+        getattr(args, "channel_id", None),
+        getattr(args, "message_ts", None),
+    )
     if notice.processing_status == "processed":
         print(
             "재처리 성공: 기존 공지의 분석 결과를 갱신했습니다. "
@@ -88,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     retrying = commands.add_parser("retry", help="선택한 실패 공지 하나 재처리")
     retrying.add_argument("--workspace-id", required=True)
     retrying.add_argument("--url", required=True, help="공지의 제출 링크 (Slack 원문 링크 아님)")
+    retrying.add_argument("--channel-id", help="재처리할 원본 채널 ID")
+    retrying.add_argument("--message-ts", help="재처리할 원본 메시지 ts")
     args = parser.parse_args(argv)
 
     # CLI에서는 아래의 정제한 오류만 표시하고 원시 AI 오류 응답을 로그로 노출하지 않는다.

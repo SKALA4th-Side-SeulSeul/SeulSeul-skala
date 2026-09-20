@@ -13,7 +13,11 @@ from seulseul.ai.client import AiClientError
 from seulseul.ai.model import NoticeAnalysis
 from seulseul.notices.events import NoticeMessageEvent, parse_notice_event
 from seulseul.notices.model import Notice
-from seulseul.notices.repository import InMemoryNoticeRepository, NoticeRepository
+from seulseul.notices.repository import (
+    AmbiguousNoticeError,
+    InMemoryNoticeRepository,
+    NoticeRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +131,6 @@ class NoticeService:
         results = []
         for original_url, canonical_url in extract_notice_urls(parsed.text):
             original = originals.get(canonical_url)
-            if original is None and self._repository.contains(workspace_id, canonical_url):
-                # 같은 링크가 다른 원본에 있으면 그 공지를 변경하지 않는다.
-                continue
             if original is not None and (
                 parsed.kind == "created"
                 or (
@@ -181,7 +182,13 @@ class NoticeService:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
         return self._repository.failed(limit, self._allowed_channel_ids, workspace_id)
 
-    def retry_failed_notice(self, workspace_id: str, notice_url: str) -> Notice:
+    def retry_failed_notice(
+        self,
+        workspace_id: str,
+        notice_url: str,
+        channel_id: str | None = None,
+        message_ts: str | None = None,
+    ) -> Notice:
         """저장된 원문으로 실패 공지 하나를 다시 분석해 같은 기록을 갱신한다."""
         if self._analyzer is None:
             raise NoticeRetryError("AI_PROVIDER가 비어 있습니다. AI 설정 후 다시 실행해 주세요.")
@@ -192,7 +199,10 @@ class NoticeService:
             canonical_url = canonicalize_url(notice_url)
         except ValueError as error:
             raise NoticeRetryError("공지의 올바른 http/https 제출 링크를 입력해 주세요.") from error
-        original = self._repository.get(workspace_id, canonical_url)
+        try:
+            original = self._repository.get(workspace_id, canonical_url, channel_id, message_ts)
+        except AmbiguousNoticeError as error:
+            raise NoticeRetryError(str(error)) from error
         if original is None or original.deleted_at is not None:
             raise NoticeRetryError("해당 워크스페이스에서 재처리할 공지를 찾을 수 없습니다.")
         if original.channel_id not in self._allowed_channel_ids:

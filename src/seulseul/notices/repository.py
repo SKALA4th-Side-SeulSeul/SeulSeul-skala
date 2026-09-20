@@ -26,6 +26,10 @@ from seulseul.notices.model import Notice, NoticeModel, NoticeSourceModel, Proce
 _MAPPED_MODELS = MAPPED_MODELS
 
 
+class AmbiguousNoticeError(ValueError):
+    """링크만으로 원본을 하나로 특정할 수 없다."""
+
+
 class NoticeRepository(Protocol):
     """공지 서비스가 사용하는 저장소 계약."""
 
@@ -39,7 +43,13 @@ class NoticeRepository(Protocol):
         self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
     ) -> list[Notice]: ...
 
-    def get(self, workspace_id: str, canonical_url: str) -> Notice | None: ...
+    def get(
+        self,
+        workspace_id: str,
+        canonical_url: str,
+        channel_id: str | None = None,
+        message_ts: str | None = None,
+    ) -> Notice | None: ...
 
     def replace_failed(self, original: Notice, result: Notice) -> bool: ...
 
@@ -59,22 +69,24 @@ class InMemoryNoticeRepository:
 
     def __init__(self, max_stored_notices: int) -> None:
         self._notices: deque[Notice] = deque(maxlen=max_stored_notices)
-        self._canonical_urls: set[tuple[str, str]] = set()
+        self._canonical_urls: set[tuple[str, str, str, str]] = set()
         self._lock = threading.Lock()
         self._sources: dict[tuple[str, str, str], tuple[Decimal, bool, bool]] = {}
 
     def contains(self, workspace_id: str, canonical_url: str) -> bool:
         with self._lock:
-            return (workspace_id, canonical_url) in self._canonical_urls
+            return any(
+                key[0] == workspace_id and key[3] == canonical_url for key in self._canonical_urls
+            )
 
     def add(self, notice: Notice) -> bool:
-        identity = (notice.workspace_id, notice.canonical_url)
+        identity = (*_source_key(notice), notice.canonical_url)
         with self._lock:
             if identity in self._canonical_urls:
                 return False
             if len(self._notices) == self._notices.maxlen:
                 removed = self._notices[-1]
-                self._canonical_urls.discard((removed.workspace_id, removed.canonical_url))
+                self._canonical_urls.discard((*_source_key(removed), removed.canonical_url))
             self._notices.appendleft(notice)
             self._canonical_urls.add(identity)
             return True
@@ -101,16 +113,27 @@ class InMemoryNoticeRepository:
                 and (workspace_id is None or notice.workspace_id == workspace_id)
             ][:limit]
 
-    def get(self, workspace_id: str, canonical_url: str) -> Notice | None:
+    def get(
+        self,
+        workspace_id: str,
+        canonical_url: str,
+        channel_id: str | None = None,
+        message_ts: str | None = None,
+    ) -> Notice | None:
         with self._lock:
-            return next(
-                (
-                    notice
-                    for notice in self._notices
-                    if notice.workspace_id == workspace_id and notice.canonical_url == canonical_url
-                ),
-                None,
-            )
+            matches = [
+                notice
+                for notice in self._notices
+                if notice.workspace_id == workspace_id
+                and notice.canonical_url == canonical_url
+                and (channel_id is None or notice.channel_id == channel_id)
+                and (message_ts is None or notice.message_ts == message_ts)
+            ]
+            if len(matches) > 1:
+                raise AmbiguousNoticeError(
+                    "같은 링크의 원본이 여러 개입니다. --channel-id와 --message-ts를 지정하세요."
+                )
+            return matches[0] if matches else None
 
     def replace_failed(self, original: Notice, result: Notice) -> bool:
         with self._lock:
@@ -169,12 +192,12 @@ class InMemoryNoticeRepository:
                     self._notices[index] = result
                     changed.append(result)
             for notice in results.values():
-                identity = (workspace_id, notice.canonical_url)
+                identity = (*_source_key(notice), notice.canonical_url)
                 if identity in self._canonical_urls:
                     continue
                 if len(self._notices) == self._notices.maxlen:
                     removed = self._notices[-1]
-                    self._canonical_urls.discard((removed.workspace_id, removed.canonical_url))
+                    self._canonical_urls.discard((*_source_key(removed), removed.canonical_url))
                 self._notices.appendleft(notice)
                 self._canonical_urls.add(identity)
                 changed.append(notice)
@@ -204,7 +227,7 @@ class SqlAlchemyNoticeRepository:
         statement = (
             insert(NoticeModel)
             .values(**_notice_values(notice))
-            .on_conflict_do_nothing(constraint="uq_notices_workspace_canonical_url")
+            .on_conflict_do_nothing(constraint="uq_notices_source_link")
             .returning(NoticeModel.id)
         )
         with self._session_factory() as session:
@@ -239,13 +262,28 @@ class SqlAlchemyNoticeRepository:
         with self._session_factory() as session:
             return [_to_notice(model) for model in session.execute(statement).scalars().all()]
 
-    def get(self, workspace_id: str, canonical_url: str) -> Notice | None:
+    def get(
+        self,
+        workspace_id: str,
+        canonical_url: str,
+        channel_id: str | None = None,
+        message_ts: str | None = None,
+    ) -> Notice | None:
         statement = select(NoticeModel).where(
             NoticeModel.workspace_id == workspace_id,
             NoticeModel.canonical_url == canonical_url,
         )
+        if channel_id is not None:
+            statement = statement.where(NoticeModel.channel_id == channel_id)
+        if message_ts is not None:
+            statement = statement.where(NoticeModel.message_ts == message_ts)
         with self._session_factory() as session:
-            model = session.execute(statement).scalar_one_or_none()
+            models = session.execute(statement.limit(2)).scalars().all()
+            if len(models) > 1:
+                raise AmbiguousNoticeError(
+                    "같은 링크의 원본이 여러 개입니다. --channel-id와 --message-ts를 지정하세요."
+                )
+            model = models[0] if models else None
             return _to_notice(model) if model is not None else None
 
     def source_notices(self, workspace_id: str, channel_id: str, message_ts: str) -> list[Notice]:
@@ -338,12 +376,14 @@ class SqlAlchemyNoticeRepository:
                     for name, value in _notice_values(result).items():
                         setattr(model, name, value)
                     changed.append(result)
-            # 다른 원본의 중복 URL은 소유권을 옮기지 않는다. 경쟁도 UNIQUE로 방어한다.
+            # 원본별 링크를 저장한다. 같은 원본 이벤트만 중복을 막는다.
             for notice in sorted(results.values(), key=lambda n: n.canonical_url):
                 inserted = session.execute(
                     insert(NoticeModel)
                     .values(**_notice_values(notice))
-                    .on_conflict_do_nothing(index_elements=["workspace_id", "canonical_url"])
+                    .on_conflict_do_nothing(
+                        index_elements=["workspace_id", "channel_id", "message_ts", "canonical_url"]
+                    )
                     .returning(NoticeModel.id)
                 ).scalar_one_or_none()
                 if inserted is not None:

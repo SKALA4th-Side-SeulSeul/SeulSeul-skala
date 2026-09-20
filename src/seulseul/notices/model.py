@@ -51,15 +51,11 @@ class Notice:
 
 
 class NoticeModel(Base):
-    """Slack 링크 하나와 AI 분석 결과를 저장한다."""
+    """Slack 원본별 링크와 AI 분석 결과. 다른 원본의 동일 링크도 보존한다."""
 
     __tablename__ = "notices"
     __table_args__ = (
-        UniqueConstraint(
-            "workspace_id",
-            "canonical_url",
-            name="uq_notices_workspace_canonical_url",
-        ),
+        Index("ix_notices_workspace_canonical_url", "workspace_id", "canonical_url"),
         UniqueConstraint(
             "workspace_id",
             "channel_id",

@@ -9,6 +9,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_production_database_port_is_only_bound_to_ipv4_loopback():
+    config = (ROOT / "compose.prod.yaml").read_text()
+    assert config.count("    ports:\n") == 1
+    assert '    ports:\n      - "127.0.0.1:5432:5432"\n' in config
+    assert "0.0.0.0" not in config and "[::]" not in config
+    assert "postgres_prod_data:/var/lib/postgresql" in config
+
+
 @pytest.fixture
 def operations(tmp_path, monkeypatch):
     repo = tmp_path / "app with spaces"
