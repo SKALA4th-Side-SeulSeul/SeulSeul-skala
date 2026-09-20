@@ -1,13 +1,16 @@
 """공지에서 제목·요약·마감일을 구조화해 추출하고 검증한다."""
 
 import json
+import math
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from seulseul.ai.client import AiClientError, ChatClient
+from seulseul.ai.client import MAX_RETRY_AFTER_SECONDS, AiClientError, ChatClient
+from seulseul.ai.deadline import CLOCK, expected_deadline
 from seulseul.ai.model import NoticeAnalysis
 
 MAX_NOTICE_INPUT_CHARS = 12_000
@@ -31,7 +34,8 @@ ANALYSIS_SYSTEM_PROMPT = """\
 
 시간대는 Asia/Seoul을 사용한다. 시각이 없으면 23:59로 정한다.
 연도가 없으면 Slack 게시일의 연도를 사용하고, 상대 날짜는 Slack 게시 시각을 기준으로 계산한다.
-마감일은 정확히 하나여야 한다."""
+마감일은 정확히 하나여야 한다. deadline_source_text에는 날짜와 시각을 함께 인용한다.
+title은 255자 이하여야 한다."""
 
 
 class NoticeAnalyzer:
@@ -67,6 +71,12 @@ class NoticeAnalyzer:
                     if last_error is not None and last_error.retry_after_seconds is not None
                     else default_delay
                 )
+                if not math.isfinite(delay) or not 0 <= delay <= MAX_RETRY_AFTER_SECONDS:
+                    raise AiClientError(
+                        "AI 재시도 대기시간이 유효하지 않거나 상한 60초를 초과했습니다.",
+                        retryable=False,
+                        retry_count=attempt - 1,
+                    )
                 self._sleeper(delay)
 
             feedback = ""
@@ -109,6 +119,10 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         if not isinstance(value, str) or not value.strip():
             raise AiClientError(f"AI 응답의 {field} 필드는 비어 있지 않은 문자열이어야 합니다.")
         values[field] = value.strip()
+        if "\x00" in value:
+            raise AiClientError(f"AI 응답의 {field}에 저장할 수 없는 문자가 있습니다.")
+    if len(values["title"]) > 255:
+        raise AiClientError("AI 제목이 DB 저장 한도 255자를 초과했습니다.")
 
     try:
         deadline_at = datetime.fromisoformat(values["deadline_at"])
@@ -118,11 +132,35 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         ) from error
     if deadline_at.tzinfo is None:
         raise AiClientError("AI 응답의 deadline_at에 시간대가 없습니다.")
-    deadline_at = deadline_at.astimezone(SEOUL_TIMEZONE)
+    try:
+        deadline_at = deadline_at.astimezone(SEOUL_TIMEZONE)
+    except (ValueError, OverflowError) as error:
+        raise AiClientError("AI 마감일이 지원 범위를 벗어났습니다.") from error
     if deadline_at < posted_at.astimezone(SEOUL_TIMEZONE):
         raise AiClientError("AI가 추출한 마감일이 Slack 게시 시각보다 과거입니다.")
     if values["deadline_source_text"] not in notice_text:
         raise AiClientError("AI가 반환한 마감 표현이 공지 원문에 없습니다.")
+    evidence = values["deadline_source_text"]
+    # 날짜만 인용해 같은 줄의 명시 시각을 누락하는 경우도 검증한다.
+    lines = [line for line in notice_text.splitlines() if evidence in line]
+    if len(lines) == 1:
+        evidence = lines[0]
+    # 다른 줄에 있는 시각을 날짜만 인용하여 23:59로 덮어쓰지 못하게 한다.
+    # 관련 시각인지 확신할 수 없으면 AI가 날짜·시각을 포함해 다시 인용하게 한다.
+    source_without_urls = re.sub(r"https?://[^\s<>|]+", "", notice_text)
+    if (
+        not CLOCK.search(evidence)
+        and (
+            CLOCK.search(source_without_urls)
+            or any(word in source_without_urls for word in ("정오", "자정", "오전", "오후"))
+        )
+        and not any(word in evidence for word in ("정오", "자정"))
+    ):
+        raise AiClientError(
+            "원문에 시각이 있습니다. 마감 근거에 날짜와 시각을 함께 인용해야 합니다."
+        )
+    if deadline_at != expected_deadline(evidence, posted_at):
+        raise AiClientError("AI 마감일이 원문의 날짜·시각과 일치하지 않습니다.")
 
     return NoticeAnalysis(
         title=values["title"],

@@ -90,6 +90,7 @@ def test_complete_classifies_retryable_statuses(status: int, retryable: bool) ->
         create_client(handler).complete("시스템", "사용자")
 
     assert error.value.retryable is retryable
+    assert error.value.auto_retryable is retryable
     assert error.value.retry_after_seconds == 3
     assert SECRET_API_KEY not in str(error.value)
 
@@ -102,6 +103,7 @@ def test_complete_reports_timeout_as_retryable() -> None:
         create_client(handler).complete("시스템", "사용자")
 
     assert error.value.retryable
+    assert error.value.auto_retryable
 
 
 def test_complete_rejects_unexpected_response_shape() -> None:
@@ -204,3 +206,101 @@ def test_analyzer_rejects_oversized_notice_without_truncating_or_calling_ai() ->
 def test_parse_notice_analysis_rejects_invalid_results(raw_output: str) -> None:
     with pytest.raises(AiClientError):
         parse_notice_analysis(raw_output, "9월 20일까지 제출", POSTED_AT)
+
+
+@pytest.mark.parametrize(
+    "source,deadline",
+    [
+        ("9월 28일까지", "2026-09-30T23:59:00+09:00"),
+        ("9월 28일까지", "2026-09-28T18:00:00+09:00"),
+        ("9/28 18:00", "2026-09-28T23:59:00+09:00"),
+        ("9/28 또는 9/30", "2026-09-28T23:59:00+09:00"),
+        ("나중에 제출", "2026-09-28T23:59:00+09:00"),
+        ("9/31", "2026-09-30T23:59:00+09:00"),
+        ("9/28 자정", "2026-09-28T23:59:00+09:00"),
+        ("9/28 25:00", "2026-09-28T23:59:00+09:00"),
+        ("9월 28일 오후 6시 반", "2026-09-28T18:00:00+09:00"),
+        ("9월 28일 밤 9시", "2026-09-28T09:00:00+09:00"),
+    ],
+)
+def test_deadline_must_match_independently_parsed_evidence(source, deadline):
+    with pytest.raises(AiClientError):
+        parse_notice_analysis(
+            analysis_json(deadline_source_text=source, deadline_at=deadline), source, POSTED_AT
+        )
+
+
+@pytest.mark.parametrize(
+    "source,deadline",
+    [
+        ("2026-09-28 18:30", "2026-09-28T18:30:00+09:00"),
+        ("9월 28일 오후 6시 30분", "2026-09-28T18:30:00+09:00"),
+        ("2026.9.28", "2026-09-28T23:59:00+09:00"),
+        ("내일", "2026-09-15T23:59:00+09:00"),
+        ("모레 오전 11시", "2026-09-16T11:00:00+09:00"),
+        ("이번 주 금요일", "2026-09-18T23:59:00+09:00"),
+        ("다음 주 월요일 정오", "2026-09-21T12:00:00+09:00"),
+        ("9/28 24:00", "2026-09-29T00:00:00+09:00"),
+    ],
+)
+def test_explicit_and_relative_deadlines_match_source(source, deadline):
+    result = parse_notice_analysis(
+        analysis_json(deadline_source_text=source, deadline_at=deadline), source, POSTED_AT
+    )
+    assert result.deadline_at.isoformat() == deadline
+
+
+def test_date_only_quote_cannot_hide_explicit_time_on_same_line():
+    with pytest.raises(AiClientError, match="일치"):
+        parse_notice_analysis(analysis_json(), "마감: 9월 20일까지 18:00 제출", POSTED_AT)
+
+
+def test_date_quote_cannot_hide_time_on_another_line():
+    text = "9월 20일까지\n마감 시간: 오후 6시"
+    with pytest.raises(AiClientError, match="함께 인용"):
+        parse_notice_analysis(analysis_json(), text, POSTED_AT)
+    assert (
+        parse_notice_analysis(
+            analysis_json(deadline_source_text=text, deadline_at="2026-09-20T18:00:00+09:00"),
+            text,
+            POSTED_AT,
+        ).deadline_at.hour
+        == 18
+    )
+
+
+@pytest.mark.parametrize("title", ["A" * 256, "제목\x00"])
+def test_title_storage_constraints_are_validated(title):
+    with pytest.raises(AiClientError):
+        parse_notice_analysis(analysis_json(title=title), "9월 20일까지", POSTED_AT)
+
+
+@pytest.mark.parametrize("delay", ["61", "inf", "nan", "-1"])
+def test_retry_after_out_of_range_fails_without_sleeping(delay):
+    calls = []
+    sleeps = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": delay})
+
+    client = create_client(handler)
+    try:
+        with pytest.raises(AiClientError) as error:
+            NoticeAnalyzer(client, sleeper=sleeps.append).analyze(
+                "9월 20일까지", "https://forms.example.test/task", POSTED_AT
+            )
+        assert not error.value.retryable
+        assert len(calls) == 1
+        assert sleeps == []
+    finally:
+        client.close()
+
+
+def test_retry_after_exact_limit_is_allowed():
+    client = SequenceChatClient([AiClientError("limited", retry_after_seconds=60), analysis_json()])
+    sleeps = []
+    NoticeAnalyzer(client, sleeper=sleeps.append).analyze(
+        "9월 20일까지", "https://forms.example.test/task", POSTED_AT
+    )
+    assert sleeps == [60]

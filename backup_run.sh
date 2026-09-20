@@ -42,7 +42,9 @@ trap 'rm -f -- "$schedule_stage/seulseul-db-backup.service" "$schedule_stage/seu
     echo 'Environment="DOCKER_CONTEXT="'
     echo "Environment=$docker_path"
     echo "ExecStart=/bin/bash $exec_path"
-    echo 'TimeoutStartSec=infinity'
+    # 실행이 멈춘 백업이 다음 예약까지 서비스를 점유하지 않도록 제한한다.
+    echo 'TimeoutStartSec=30min'
+    echo 'TimeoutStopSec=30s'
 } > "$schedule_stage/seulseul-db-backup.service"
 {
     echo "$schedule_marker"

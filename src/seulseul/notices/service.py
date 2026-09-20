@@ -4,7 +4,7 @@ import logging
 import re
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
@@ -26,6 +26,7 @@ NOTICE_URL_KEYWORDS = ("form", "docs")
 URL_PATTERN = re.compile(r"https?://[^\s<>|]+", re.IGNORECASE)
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
+AUTO_RETRY_DELAYS = (300, 900, 3600)
 
 
 class NoticeAnalyzerProtocol(Protocol):
@@ -34,6 +35,10 @@ class NoticeAnalyzerProtocol(Protocol):
 
 class NoticeRetryError(Exception):
     """선택한 공지를 재처리할 수 없을 때 발생한다."""
+
+    def __init__(self, message: str, *, auto_retryable: bool = False) -> None:
+        super().__init__(message)
+        self.auto_retryable = auto_retryable
 
 
 def extract_notice_urls(text: str) -> tuple[tuple[str, str], ...]:
@@ -74,6 +79,8 @@ class NoticeService:
         analyzer: NoticeAnalyzerProtocol | None = None,
         repository: NoticeRepository | None = None,
         on_change: Callable[[], None] = lambda: None,
+        permalink_resolver: Callable[[str, str], str] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         if not allowed_channel_ids:
             raise ValueError("공지 채널 ID를 하나 이상 설정해야 합니다.")
@@ -85,6 +92,8 @@ class NoticeService:
         self._analyzer = analyzer
         self._repository = repository or InMemoryNoticeRepository(max_stored_notices)
         self._on_change = on_change
+        self._permalink_resolver = permalink_resolver
+        self._clock = clock
 
     def parse_event(
         self, event: Mapping[str, Any], bot_user_id: str | None, bot_id: str | None = None
@@ -110,14 +119,31 @@ class NoticeService:
         source_permalink: str = "",
         bot_user_id: str | None = None,
         bot_id: str | None = None,
+        collection_error: str | None = None,
+        collection_retryable: bool = False,
     ) -> list[Notice]:
         """최신 원본 이벤트만 적용하고 링크별 공지·체크리스트를 함께 동기화한다."""
         parsed = self.parse_event(event, bot_user_id, bot_id)
         if parsed is None:
             return []
-        if not workspace_id or (self.needs_permalink(parsed) and not source_permalink):
+        if not workspace_id or (
+            self.needs_permalink(parsed) and not source_permalink and not collection_error
+        ):
             raise ValueError("workspace_id와 source_permalink는 비어 있을 수 없습니다.")
         if not self._repository.begin_event(workspace_id, parsed):
+            return []
+        links = extract_notice_urls(parsed.text)
+        if "\x00" in parsed.text or any(
+            len(canonical.encode("utf-8")) > 2048 for _, canonical in links
+        ):
+            # 저장할 수 없는 URL을 자르거나 같은 키로 합치지 않는다.
+            # 원본 식별자는 pending으로 남겨 운영자가 원문을 수정하도록 한다.
+            logger.error(
+                "공지 입력 저장 한도 초과: channel=%s ts=%s; "
+                "NUL 문자 또는 URL UTF-8 2048바이트 초과. pending 조회 후 원문 수정 필요",
+                parsed.channel_id,
+                parsed.message_ts,
+            )
             return []
         originals = {
             notice.canonical_url: notice
@@ -129,7 +155,7 @@ class NoticeService:
             SEOUL_TIMEZONE
         )
         results = []
-        for original_url, canonical_url in extract_notice_urls(parsed.text):
+        for original_url, canonical_url in links:
             original = originals.get(canonical_url)
             if original is not None and (
                 parsed.kind == "created"
@@ -150,6 +176,8 @@ class NoticeService:
                 canonical_url=canonical_url,
                 source_permalink=source_permalink,
                 posted_at=posted_at,
+                collection_error=collection_error,
+                collection_retryable=collection_retryable,
             )
             if (
                 analyzed.processing_status != "processed"
@@ -176,6 +204,14 @@ class NoticeService:
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
         return self._repository.recent(limit, workspace_id)
+
+    def pending_sources(
+        self, limit: int, *, workspace_id: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        """처리 중이거나 중단된 원본 식별자를 조회한다. 재처리하거나 상태를 바꾸지 않는다."""
+        if limit < 1:
+            raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
+        return self._repository.pending_sources(limit, self._allowed_channel_ids, workspace_id)
 
     def failed_notices(self, limit: int, *, workspace_id: str | None = None) -> list[Notice]:
         if limit < 1:
@@ -210,6 +246,31 @@ class NoticeService:
         if original.processing_status != "processing_failed":
             raise NoticeRetryError("AI 분석에 실패한 공지만 재처리할 수 있습니다.")
 
+        analyzed = self._retry_analysis(original)
+        if not self._repository.replace_failed(original, analyzed):
+            raise NoticeRetryError("분석 중 공지 상태가 변경되었습니다. 목록을 다시 확인해 주세요.")
+        if analyzed.processing_status == "processed":
+            self._on_change()
+        return analyzed
+
+    def _retry_analysis(self, original: Notice) -> Notice:
+        source_permalink = original.source_permalink
+        if not source_permalink:
+            if self._permalink_resolver is None:
+                raise NoticeRetryError(
+                    "원문 링크 조회가 필요합니다. 운영자 재처리 CLI를 사용하세요."
+                )
+            try:
+                source_permalink = self._permalink_resolver(
+                    original.channel_id, original.message_ts
+                )
+                if not source_permalink:
+                    raise ValueError("empty permalink")
+            except Exception as error:
+                raise NoticeRetryError(
+                    "Slack 원문 링크를 아직 조회할 수 없습니다. 기존 실패 기록은 유지합니다.",
+                    auto_retryable=getattr(error, "auto_retryable", False),
+                ) from error
         analyzed = self._build_notice(
             workspace_id=original.workspace_id,
             channel_id=original.channel_id,
@@ -217,17 +278,60 @@ class NoticeService:
             text=original.text,
             original_url=original.original_url,
             canonical_url=original.canonical_url,
-            source_permalink=original.source_permalink,
+            source_permalink=source_permalink,
             posted_at=original.posted_at,
         )
         # 수정 분석 실패로 남아 있던 기존 요약이 있다면 실패 시에도 유지한다(D-011).
         if analyzed.processing_status == "processing_failed":
             analyzed = replace(analyzed, analysis=original.analysis)
-        if not self._repository.replace_failed(original, analyzed):
-            raise NoticeRetryError("분석 중 공지 상태가 변경되었습니다. 목록을 다시 확인해 주세요.")
-        if analyzed.processing_status == "processed":
-            self._on_change()
         return analyzed
+
+    def run_retries(
+        self, workspace_id: str, should_stop: Callable[[], bool] = lambda: False
+    ) -> None:
+        """단일 운영 봇의 별도 작업. 예약을 먼저 전진시켜 재시작에도 무한 호출하지 않는다."""
+        if self._analyzer is None:
+            return
+        for original in self._repository.due_retries(
+            self._clock(), self._allowed_channel_ids, workspace_id, 10
+        ):
+            if should_stop():
+                break
+            count = original.retry_count + 1
+            next_at = (
+                self._clock() + timedelta(seconds=AUTO_RETRY_DELAYS[count])
+                if count < len(AUTO_RETRY_DELAYS)
+                else None
+            )
+            claimed = replace(original, retry_count=count, next_retry_at=next_at)
+            if not self._repository.replace_failed(original, claimed):
+                continue
+            try:
+                result = self._retry_analysis(claimed)
+            except NoticeRetryError as error:
+                result = replace(
+                    claimed,
+                    next_retry_at=next_at if error.auto_retryable else None,
+                    last_error=str(error),
+                )
+            result = replace(
+                result,
+                retry_count=count,
+                next_retry_at=(
+                    self._clock() + timedelta(seconds=AUTO_RETRY_DELAYS[count])
+                    if result.next_retry_at is not None and count < len(AUTO_RETRY_DELAYS)
+                    else None
+                ),
+            )
+            if self._repository.replace_failed(claimed, result):
+                if result.processing_status == "processed":
+                    self._on_change()
+                elif result.next_retry_at is None:
+                    logger.warning(
+                        "공지 자동 재처리 종료: channel=%s ts=%s",
+                        result.channel_id,
+                        result.message_ts,
+                    )
 
     def _build_notice(
         self,
@@ -240,7 +344,25 @@ class NoticeService:
         canonical_url: str,
         source_permalink: str,
         posted_at: datetime,
+        collection_error: str | None = None,
+        collection_retryable: bool = False,
     ) -> Notice:
+        if collection_error:
+            return Notice(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                text=text,
+                original_url=original_url,
+                canonical_url=canonical_url,
+                source_permalink=source_permalink,
+                posted_at=posted_at,
+                processing_status="processing_failed",
+                last_error=collection_error,
+                next_retry_at=self._clock() + timedelta(seconds=AUTO_RETRY_DELAYS[0])
+                if collection_retryable
+                else None,
+            )
         if self._analyzer is None:
             return Notice(
                 workspace_id=workspace_id,
@@ -255,13 +377,27 @@ class NoticeService:
             )
         try:
             analysis = self._analyzer.analyze(text, original_url, posted_at)
-        except AiClientError as error:
+            if len(analysis.title) > 255 or "\x00" in (
+                analysis.title + analysis.summary + analysis.deadline_source_text
+            ):
+                raise AiClientError("AI 결과가 DB 저장 규격을 벗어났습니다.", retryable=False)
+        except Exception as error:
+            # 공급자/검증기의 예상 밖 오류도 원문 예약 상태에 방치하지 않는다.
+            # DB 저장 자체 실패·프로세스 강제 종료는 별도 pending 점검 대상이다.
+            failure = (
+                error
+                if isinstance(error, AiClientError)
+                else AiClientError(
+                    f"AI 분석 처리 중 예외가 발생했습니다: {type(error).__name__}",
+                    retryable=False,
+                )
+            )
             logger.warning(
                 "공지 AI 분석 실패: channel=%s ts=%s url=%s 원인=%s",
                 channel_id,
                 message_ts,
                 canonical_url,
-                error,
+                failure,
             )
             return Notice(
                 workspace_id=workspace_id,
@@ -273,8 +409,11 @@ class NoticeService:
                 source_permalink=source_permalink,
                 posted_at=posted_at,
                 processing_status="processing_failed",
-                retry_count=error.retry_count,
-                last_error=str(error),
+                retry_count=0,
+                last_error=str(failure),
+                next_retry_at=self._clock() + timedelta(seconds=AUTO_RETRY_DELAYS[0])
+                if failure.auto_retryable
+                else None,
             )
         return Notice(
             workspace_id=workspace_id,

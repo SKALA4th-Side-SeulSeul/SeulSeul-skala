@@ -3,7 +3,7 @@
 import logging
 from argparse import Namespace
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from importlib import import_module
 from typing import Any
@@ -641,7 +641,7 @@ def test_ai_failure_is_classified_without_logging_notice_text(
     assert "홍길동" not in caplog.text
 
 
-def test_ai_retry_count_is_passed_to_repository() -> None:
+def test_delayed_retry_budget_starts_at_zero_after_immediate_attempts() -> None:
     repository = InMemoryNoticeRepository(10)
     analyzer = FakeAnalyzer(AiClientError("AI 서버 오류", retry_count=2))
     service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
@@ -649,7 +649,7 @@ def test_ai_retry_count_is_passed_to_repository() -> None:
     record(service)
 
     assert repository.recent(10)[0].processing_status == "processing_failed"
-    assert repository.recent(10)[0].retry_count == 2
+    assert repository.recent(10)[0].retry_count == 0
     assert repository.recent(10)[0].last_error == "AI 서버 오류"
 
 
@@ -861,7 +861,7 @@ def test_retry_failure_updates_error_but_preserves_previous_analysis() -> None:
 
     assert result.processing_status == "processing_failed"
     assert result.last_error == "새 오류"
-    assert result.retry_count == 1
+    assert result.retry_count == 0
     assert result.analysis == previous_analysis
     assert result.next_retry_at is None
     assert service.recent_notices(10) == [result]
@@ -891,6 +891,123 @@ def test_retry_rejects_ineligible_notice_without_ai_call(overrides: dict[str, An
     assert repository.get(original.workspace_id, original.canonical_url) == original
 
 
+def test_automatic_retry_schedule_survives_service_restart_and_stops_at_three(notice_repository):
+    now = [datetime(2026, 9, 14, 10, tzinfo=timezone.utc)]
+    analyzer = FakeAnalyzer(AiClientError("timeout", auto_retryable=True))
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer, clock=lambda: now[0]
+    )
+    original = record(service)[0]
+    assert original.next_retry_at == now[0] + timedelta(minutes=5)
+    service.run_retries(WORKSPACE_ID)
+    assert len(analyzer.calls) == 1
+    for count, delay in enumerate((5, 15, 60), 1):
+        now[0] += timedelta(minutes=delay)
+        service = NoticeService(
+            {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer, clock=lambda: now[0]
+        )
+        service.run_retries(WORKSPACE_ID)
+        stored = service.failed_notices(10)[0]
+        assert stored.retry_count == count
+        assert (stored.next_retry_at is None) == (count == 3)
+    now[0] += timedelta(days=1)
+    service.run_retries(WORKSPACE_ID)
+    assert len(analyzer.calls) == 4
+
+
+@pytest.mark.parametrize("outcome", ["success", "invalid", "deleted"])
+def test_auto_retry_stops_on_success_content_error_or_deleted_source(notice_repository, outcome):
+    now = [datetime(2026, 9, 14, 10, tzinfo=timezone.utc)]
+    analyzer = FakeAnalyzer(AiClientError("timeout", auto_retryable=True))
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer, clock=lambda: now[0]
+    )
+    original = record(service)[0]
+    if outcome == "deleted":
+        record(service, deleted_message())
+    analyzer.error = AiClientError("날짜 불일치") if outcome == "invalid" else None
+    now[0] += timedelta(minutes=5)
+    service.run_retries(WORKSPACE_ID)
+    stored = notice_repository.get(WORKSPACE_ID, original.canonical_url)
+    assert stored.next_retry_at is None
+    if outcome == "success":
+        assert stored.processing_status == "processed"
+    elif outcome == "invalid":
+        assert stored.processing_status == "processing_failed"
+    else:
+        assert stored.deleted_at is not None
+        assert len(analyzer.calls) == 1
+
+
+def test_auto_retry_claim_is_consumed_before_crash_and_is_not_repeated_immediately(
+    notice_repository,
+):
+    now = [datetime(2026, 9, 14, 10, tzinfo=timezone.utc)]
+    analyzer = FakeAnalyzer(AiClientError("timeout", auto_retryable=True))
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer, clock=lambda: now[0]
+    )
+    record(service)
+    analyzer.error = KeyboardInterrupt()
+    now[0] += timedelta(minutes=5)
+    with pytest.raises(KeyboardInterrupt):
+        service.run_retries(WORKSPACE_ID)
+    assert service.failed_notices(10)[0].retry_count == 1
+    service.run_retries(WORKSPACE_ID)
+    assert len(analyzer.calls) == 2
+    analyzer.error = None
+    now[0] += timedelta(minutes=15)
+    service.run_retries(WORKSPACE_ID)
+    assert service.failed_notices(10) == []
+
+
+def test_auto_retry_excludes_pending_foreign_and_unclassified_failures(notice_repository):
+    now = [datetime(2026, 9, 14, 10, tzinfo=timezone.utc)]
+    analyzer = FakeAnalyzer(AiClientError("timeout", auto_retryable=True))
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer, clock=lambda: now[0]
+    )
+    record(service)
+    event = parse_notice_event(changed_message("수정 중"), {ALLOWED_CHANNEL}, None)
+    notice_repository.begin_event(WORKSPACE_ID, event)
+    now[0] += timedelta(minutes=5)
+    service.run_retries(WORKSPACE_ID)
+    service.run_retries("TOTHER")
+    assert len(analyzer.calls) == 1
+    assert service.pending_sources(10)
+
+
+def test_permalink_transient_failures_use_automatic_budget(notice_repository):
+    from seulseul.slack.client import MessagePermalinkError
+
+    now = [datetime(2026, 9, 14, 10, tzinfo=timezone.utc)]
+    resolver = MagicMock(side_effect=MessagePermalinkError("network", auto_retryable=True))
+    analyzer = FakeAnalyzer()
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        repository=notice_repository,
+        analyzer=analyzer,
+        clock=lambda: now[0],
+        permalink_resolver=resolver,
+    )
+    service.record_channel_message(
+        channel_message(),
+        workspace_id=WORKSPACE_ID,
+        collection_error="원문 조회 실패",
+        collection_retryable=True,
+    )
+    now[0] += timedelta(minutes=5)
+    service.run_retries(WORKSPACE_ID)
+    assert service.failed_notices(10)[0].retry_count == 1
+    assert service.failed_notices(10)[0].next_retry_at is not None
+    assert analyzer.calls == []
+    resolver.side_effect = None
+    resolver.return_value = PERMALINK
+    now[0] += timedelta(minutes=15)
+    service.run_retries(WORKSPACE_ID)
+    assert service.failed_notices(10) == []
+
+
 def test_retry_with_ai_disabled_leaves_failure_unchanged() -> None:
     repository = InMemoryNoticeRepository(10)
     original = failed_notice()
@@ -900,6 +1017,83 @@ def test_retry_with_ai_disabled_leaves_failure_unchanged() -> None:
     with pytest.raises(NoticeRetryError, match="AI_PROVIDER"):
         service.retry_failed_notice(WORKSPACE_ID, original.original_url)
     assert service.failed_notices(10) == [original]
+
+
+def test_permalink_failure_is_saved_then_recovered_without_new_source(notice_repository):
+    analyzer = FakeAnalyzer()
+    resolver = MagicMock(return_value=PERMALINK)
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        repository=notice_repository,
+        analyzer=analyzer,
+        permalink_resolver=resolver,
+    )
+    notices = service.record_channel_message(
+        channel_message(),
+        workspace_id=WORKSPACE_ID,
+        collection_error="Slack 원문 링크 조회 실패",
+    )
+    assert notices[0].processing_status == "processing_failed"
+    assert analyzer.calls == []
+    assert service.pending_sources(10) == []
+    result = service.retry_failed_notice(WORKSPACE_ID, notices[0].original_url)
+    assert result.processing_status == "processed"
+    assert result.source_permalink == PERMALINK
+    assert len(service.recent_notices(10)) == 1
+    assert service.recent_notices(10)[0].source_permalink == PERMALINK
+    resolver.assert_called_once_with(ALLOWED_CHANNEL, MESSAGE_TS)
+
+
+def test_permalink_retry_failure_preserves_record_and_does_not_call_ai(notice_repository):
+    analyzer = FakeAnalyzer()
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        repository=notice_repository,
+        analyzer=analyzer,
+        permalink_resolver=MagicMock(side_effect=RuntimeError("do not expose")),
+    )
+    original = service.record_channel_message(
+        channel_message(),
+        workspace_id=WORKSPACE_ID,
+        collection_error="Slack 원문 링크 조회 실패",
+    )[0]
+    stored_before = service.failed_notices(10)
+    with pytest.raises(NoticeRetryError, match="기존 실패 기록"):
+        service.retry_failed_notice(WORKSPACE_ID, original.original_url)
+    assert service.failed_notices(10) == stored_before
+    assert analyzer.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure", [OverflowError("secret"), AiClientError("60초 상한", retryable=False)]
+)
+def test_ai_failures_are_recorded_and_source_is_not_left_pending(notice_repository, failure):
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=FakeAnalyzer(error=failure)
+    )
+    result = record(service)[0]
+    assert result.processing_status == "processing_failed"
+    assert "secret" not in result.last_error
+    assert service.pending_sources(10) == []
+    assert len(service.failed_notices(10)) == 1
+    recovered = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=FakeAnalyzer()
+    ).retry_failed_notice(WORKSPACE_ID, result.original_url)
+    assert recovered.processing_status == "processed"
+
+
+@pytest.mark.parametrize(
+    "text", ["https://forms.example.test/" + "x" * 2048, "https://forms.example.test/task\x00"]
+)
+def test_unstorable_input_remains_identifiable_without_partial_notice(notice_repository, text):
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer)
+    assert record(service, channel_message(text=text)) == []
+    assert service.pending_sources(10) == [(WORKSPACE_ID, ALLOWED_CHANNEL, MESSAGE_TS)]
+    assert service.recent_notices(10) == []
+    assert analyzer.calls == []
+    assert record(service, changed_message("9월 20일까지 https://forms.example.test/task"))
+    assert service.pending_sources(10) == []
 
 
 @pytest.mark.parametrize("url", ["not-a-url", "https://[", "ftp://forms.example.test/task"])
@@ -1094,7 +1288,44 @@ def test_retry_missing_notice_never_calls_ai() -> None:
     assert analyzer.calls == []
 
 
-@pytest.mark.parametrize("mode", ["list", "retry", "disabled", "config_error"])
+def test_pending_sources_are_scoped_read_only_and_include_deleted(notice_repository, capsys):
+    event = parse_notice_event(channel_message(), {ALLOWED_CHANNEL}, "USEULSEUL")
+    notice_repository.begin_event(WORKSPACE_ID, event)
+    notice_repository.begin_event("TOTHER", event)
+    notice_repository.begin_event(WORKSPACE_ID, replace(event, channel_id="COTHER"))
+    deleted = replace(event, message_ts="1789344001.000100", kind="deleted")
+    notice_repository.begin_event(WORKSPACE_ID, deleted)
+    applied = replace(event, message_ts="1789344002.000100")
+    notice_repository.begin_event(WORKSPACE_ID, applied)
+    notice_repository.apply_event(WORKSPACE_ID, applied, [])
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, repository=notice_repository, analyzer=analyzer)
+    expected = [
+        (WORKSPACE_ID, ALLOWED_CHANNEL, event.message_ts),
+        (WORKSPACE_ID, ALLOWED_CHANNEL, deleted.message_ts),
+    ]
+    assert service.pending_sources(20, workspace_id=WORKSPACE_ID) == expected
+    assert service.pending_sources(1, workspace_id=WORKSPACE_ID) == expected[:1]
+    assert len(service.pending_sources(20)) == 3
+    with pytest.raises(ValueError):
+        service.pending_sources(0)
+    assert (
+        run_command(service, Namespace(action="pending", workspace_id=WORKSPACE_ID, limit=20)) == 0
+    )
+    output = capsys.readouterr().out
+    assert "정상 처리 중" in output and "자동 복구할 수 없습니다" in output
+    assert "삭제된 원본" in output and "TOTHER" not in output and "COTHER" not in output
+    assert service.pending_sources(20, workspace_id=WORKSPACE_ID) == expected
+    assert analyzer.calls == []
+
+
+def test_pending_sources_empty_cli(capsys):
+    service = NoticeService({ALLOWED_CHANNEL})
+    assert run_command(service, Namespace(action="pending", workspace_id=None, limit=20)) == 0
+    assert "미적용 원본이 없습니다" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["list", "pending", "retry", "disabled", "config_error"])
 def test_retry_cli_wires_dependencies_and_closes_resources(
     mode: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1106,6 +1337,7 @@ def test_retry_cli_wires_dependencies_and_closes_resources(
     client_constructor = MagicMock(return_value=client)
     service = MagicMock()
     service.failed_notices.return_value = []
+    service.pending_sources.return_value = []
     service.retry_failed_notice.return_value = failed_notice(processing_status="processed")
     service_constructor = MagicMock(return_value=service)
     monkeypatch.setattr(
@@ -1138,8 +1370,8 @@ def test_retry_cli_wires_dependencies_and_closes_resources(
     monkeypatch.setattr(prefix + "load_ai_settings", settings_loader)
 
     args = (
-        ["list"]
-        if mode == "list"
+        [mode]
+        if mode in {"list", "pending"}
         else [
             "retry",
             "--workspace-id",
@@ -1151,11 +1383,13 @@ def test_retry_cli_wires_dependencies_and_closes_resources(
     assert retry_main(args) == (1 if mode in {"disabled", "config_error"} else 0)
 
     engine.dispose.assert_called_once_with()
-    if mode == "list":
+    if mode in {"list", "pending"}:
         settings_loader.assert_not_called()
         client_constructor.assert_not_called()
         service.retry_failed_notice.assert_not_called()
-        assert "실패 공지가 없습니다" in capsys.readouterr().out
+        assert (
+            "실패 공지가 없습니다" if mode == "list" else "미적용 원본이 없습니다"
+        ) in capsys.readouterr().out
     elif mode == "retry":
         client.close.assert_called_once_with()
         assert client_constructor.call_args.kwargs["disable_thinking"] is False

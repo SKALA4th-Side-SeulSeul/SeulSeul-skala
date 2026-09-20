@@ -262,6 +262,9 @@ def test_schedule_is_daily_korean_time_private_and_repeatable(scheduling):
     assert 'ExecStart=/bin/bash "' + str(repo / "backup.sh") + '"' in service.read_text()
     assert 'Environment="DOCKER_HOST=unix://%t/docker.sock"' in service.read_text()
     assert 'Environment="DOCKER_CONTEXT="' in service.read_text()
+    assert "TimeoutStartSec=30min" in service.read_text()
+    assert "TimeoutStopSec=30s" in service.read_text()
+    assert "TimeoutStartSec=infinity" not in service.read_text()
     assert "OnCalendar=*-*-* 03:00:00 Asia/Seoul" in timer.read_text()
     assert "Persistent=true" in timer.read_text()
     assert sorted(p.name for p in units.iterdir()) == [service.name, timer.name]

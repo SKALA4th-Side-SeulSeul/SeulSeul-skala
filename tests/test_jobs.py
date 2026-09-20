@@ -4,7 +4,7 @@ from threading import Event
 from unittest.mock import Mock
 
 from seulseul.jobs.scheduler import ChecklistScheduler
-from seulseul.jobs.tasks import refresh_checklists
+from seulseul.jobs.tasks import refresh_checklists, retry_notices
 
 
 def test_task_delegates_to_service() -> None:
@@ -12,6 +12,12 @@ def test_task_delegates_to_service() -> None:
     stop = Mock(return_value=False)
     refresh_checklists(service, stop)
     service.run_due.assert_called_once_with(stop)
+
+
+def test_retry_task_delegates_to_notice_service():
+    service, stop = Mock(), Mock(return_value=False)
+    retry_notices(service, "TTEST", stop)
+    service.run_retries.assert_called_once_with("TTEST", stop)
 
 
 def test_scheduler_runs_on_start_and_wakeup_and_stops() -> None:

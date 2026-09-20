@@ -1,6 +1,6 @@
 # 로컬·서버 작업 목록
 
-PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에 배포하기 위한 작업입니다. 기능 개발 순서는 `docs/PLANS.md`, 확정된 결정은 `docs/DECISIONS.md`를 따르며 여기서 반복하지 않습니다. 작업을 시작하면 항목 옆에 담당자 이니셜을 표시하고, 끝나면 체크합니다.
+PostgreSQL과 Docker Compose의 환경별 작업·운영 기록입니다. 현재 잔여 작업은 `docs/PLANS.md`, 과거 구현 이력은 `docs/HISTORY.md`, 결정은 `docs/DECISIONS.md`를 따릅니다. 아래의 2026-09-15 상태는 당시 기록이며 현재 서버 직접 조회 결과가 아닙니다. 사용자 확인과 운영 직접 검증을 구분합니다.
 
 공개 저장소이므로 서버 IP, 접속 주소, 비밀번호, 계정 정보, 같은 서버의 다른 서비스 정보는 적지 않습니다.
 
@@ -13,7 +13,7 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - Slack: Socket Mode (D-018). 서버에 들어오는 포트를 열지 않습니다.
 - 서버: 이미 생성된 Oracle Cloud VM 한 대. 배포 계정 `seulseul`의 **Rootless Docker**로 Docker Compose를 실행합니다.
 - 메모리: 서버에서 SeulSeul이 쓰는 메모리는 **모든 컨테이너를 합쳐 최대 6GB**이며, `seulseul` 사용자 단위로 OS가 강제합니다.
-- 봇은 로컬·서버 모두 **한 번에 1개만** 실행합니다. 여러 개를 띄우면 이벤트가 나뉘고 정기 DM이 중복됩니다.
+- 동일 Slack 앱의 봇은 로컬·서버를 합쳐 **한 번에 1개만** 실행합니다. 여러 개를 띄우면 이벤트가 나뉘고 메시지 정리·갱신이 경합합니다. 일일 정시 DM은 보내지 않습니다.
 
 ## 서버 현재 상태 (2026-09-15 기준)
 
@@ -43,7 +43,7 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 | 메모리 | 이 계정의 모든 프로세스·컨테이너 합계 최대 6GB |
 
 - 접속은 SSH로 직접 로그인합니다. `sudo -iu seulseul`처럼 계정을 전환하면 Rootless Docker가 동작하지 않을 수 있습니다.
-- 배포 계정의 포트 포워딩 금지는 유지합니다. DBeaver 접속은 별도 키 인증 전용 계정과 루프백 DB 포트만 사용하는 `docs/DB-ACCESS.md` 절차를 따릅니다.
+- 위 SSH 그룹 정책은 당시 상태입니다. 이후 15432·기존 비밀번호 SSH 터널 안내 후 DBeaver 접속 성공이 확인됐으므로 실제 계정·포워딩 적용값은 재확인합니다. 현재 접속과 전용 계정 선택안은 `docs/DB-ACCESS.md`를 따릅니다.
 - 비밀번호는 비밀번호 관리자에서 무작위로 생성해 보관하고, 채팅·문서·저장소에 적지 않습니다.
 - 설정 파일: `/etc/ssh/sshd_config.d/90-seulseul-password.conf` (원본 백업 `/root/90-seulseul-password.conf.bak`)
 
@@ -51,7 +51,7 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 
 - **`sudo netfilter-persistent save`를 실행하지 않습니다.** 현재 적용된 규칙을 그대로 저장해 fail2ban 차단 목록이 규칙 파일에 섞입니다. 방화벽을 바꿀 때는 `/etc/iptables/rules.v4`를 직접 수정하고 `sudo -n sh -c 'iptables-restore --test < /etc/iptables/rules.v4'`로 시험한 뒤 적용합니다.
 - **규칙 파일에는 fail2ban 규칙(`f2b-…`)을 넣지 않습니다.** fail2ban이 시작할 때 스스로 추가합니다.
-- **컨테이너 포트를 외부에 공개하지 않습니다.** 사용자 승인으로 PostgreSQL의 `127.0.0.1:5432:5432` 바인딩만 예외 허용합니다. `0.0.0.0`, `[::]`, IP 생략 바인딩은 금지하며 Oracle·호스트 방화벽의 5432 허용 규칙도 추가하지 않습니다. SSH 터널은 별도 계정에 목적지 한정으로 허용합니다.
+- **컨테이너 포트를 외부 인터페이스에 공개하지 않습니다.** PostgreSQL은 루프백 바인딩·SSH 터널로만 접근합니다. 저장소 5432와 접속 성공 안내 15432의 차이는 재배포 전 확인합니다. `0.0.0.0`, `[::]`, IP 생략 바인딩과 DB 포트 방화벽 개방은 금지합니다. SSH의 허용 목적지는 실제 루프백 DB 포트로 제한하며 적용값을 확인합니다.
 - **일반 Docker 서비스를 다시 켜지 않습니다.** 필요하면 이유를 `docs/DECISIONS.md`에 기록한 뒤 켭니다.
 - **`/etc/default/netfilter-persistent`는 Oracle 이미지 설정(`IPTABLES_RESTORE_NOFLUSH=yes`)을 유지합니다.**
 - `ubuntu` 계정의 관리 명령은 `sudo -n`으로 실행합니다. `sudo` 없이 `systemctl restart` 등을 실행하면 비밀번호를 물은 뒤 실패합니다.
@@ -79,18 +79,18 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [x] DB를 PostgreSQL로 확정 (D-016)
 - [x] ORM·마이그레이션 도구: SQLAlchemy, Alembic (D-016)
 - [x] 운영 AI 제공자와 초기 모델 (D-017)
-- [ ] 배포 방식 기록: 기존 Oracle ARM VM(Ubuntu 24.04) + `seulseul` Rootless Docker Compose, 서버 Ollama 미사용 → D-007 후속 결정
+- [x] 배포 방식 기록: 기존 Oracle ARM VM(Ubuntu 24.04) + Rootless Docker Compose, 서버 Ollama 미사용 (D-028)
 - [ ] 배포 계정 권한 구조(Rootless Docker, 비밀번호 로그인 그룹, fail2ban 계정별 기준) 결정 기록
-- [ ] NVIDIA로 전송할 공지 데이터와 개인정보 처리 정책 (`docs/PLANS.md` 5단계)
+- [ ] NVIDIA로 전송할 공지 데이터와 개인정보 처리 정책 (`docs/PLANS.md`)
 - [x] DB 드라이버 선택: Psycopg 3.3 binary + SQLAlchemy 2.0 동기 엔진 (D-020)
 
 ## 1. 로컬
 
-- D-027 다중 원본 마이그레이션 `d94132ac684e`는 로컬 격리 PostgreSQL 스키마에서 완료 기록 backfill·upgrade/downgrade·다중 원본 저장·위험 downgrade 거절을 검증했습니다. 테스트 트랜잭션은 롤백했으며 실제 개발·운영 스키마에는 아직 적용하지 않았습니다. 운영은 먼저 백업하고 봇을 멈춘 뒤 새 이미지의 마이그레이션을 적용해야 합니다.
+- D-027 마이그레이션 `d94132ac684e`는 로컬 격리 PostgreSQL에서 backfill·upgrade/downgrade·위험 downgrade 거절을 검증했고 테스트 트랜잭션은 롤백했습니다. 이후 사용자가 운영 반별 동일 링크 흐름을 확인했습니다. 운영 revision의 직접 조회 기록은 별도로 확인하며 향후 마이그레이션은 README의 백업·`run.sh` 절차를 따릅니다.
 
 ### 1-1. PostgreSQL 기반
 
-의존성 추가, 연결·세션, 모델·첫 마이그레이션은 `docs/PLANS.md` 4단계를 따릅니다. 여기서는 Docker 관련 작업만 다룹니다.
+의존성 추가, 연결·세션, 모델·첫 마이그레이션의 완료 이력은 `docs/HISTORY.md`를 참고합니다. 여기서는 Docker 관련 작업만 다룹니다.
 
 - [x] `compose.yaml`에 로컬 개발용 `postgres` 서비스만 추가. 포트는 `127.0.0.1:5432`에만 연결하고 개발 전용 named volume 사용
 - [x] `.env.example`의 로컬 `DATABASE_URL` 형식 주석 채우기 (값은 비움, 호스트는 `127.0.0.1`)
@@ -136,8 +136,8 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [x] `seulseul-deploy` 그룹 생성·추가
 - [x] fail2ban `sshd-seulseul` jail 적용 (재부팅 후 `sshd`, `sshd-seulseul` 동작 확인)
 - [x] `/opt/seulseul` 삭제
-- [ ] `~/app`, `~/backups`(700) 폴더 생성
-- [ ] SSH 그룹 규칙 적용값 확인: `seulseul`은 `passwordauthentication yes`, 포워딩·에이전트·X11·터널 `no`
+- [x] `~/app`, `~/backups` 폴더 존재 (사용자 터미널 출력 확인, 현재 권한은 별도 검증)
+- [ ] SSH 그룹 규칙 적용값과 목적지 한정 포워딩 확인 (`docs/DB-ACCESS.md`)
 - [ ] fail2ban 기준값 확인: `sshd-seulseul` `5 / 3600 / 86400`, `sshd` `2 / 36000 / 5184000`
 
 ### 2-3. 운영 이미지와 배포 (`seulseul` 계정)
@@ -146,15 +146,15 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [x] `config.py`의 `.env` 경로 전제 정리. 컨테이너에서는 Compose가 환경변수를 넣음
 - [x] `Dockerfile`: `python:3.11-slim` 기반, 컨테이너 안에서도 비루트 사용자로 실행, 의존성 설치 레이어 분리
 - [x] `.dockerignore`: `.env`, `.venv/`, 캐시, `.git/` 제외
-- [x] `compose.prod.yaml`에 `bot`과 `postgres` 서비스 추가. PostgreSQL 포트는 공개하지 않고 운영 전용 named volume과 healthcheck 사용
+- [x] `compose.prod.yaml`에 `bot`·`postgres` 추가, 루프백 DB 포트·운영 named volume·healthcheck 사용
 - [x] 운영 DB는 로컬과 다른 DB 이름·계정·비밀번호를 사용하고 `DATABASE_URL`의 호스트는 Compose 서비스명 `postgres`로 설정
 - [x] 서버와 같은 `linux/arm64` 이미지 빌드 확인 (`docker build --platform linux/arm64`)
-- [ ] 서버의 Rootless Docker에서 `compose.prod.yaml` 동작 확인
-- [ ] `~/app`에 저장소 clone, 서버 전용 `~/app/.env` 작성(권한 600): **운영용 Slack 앱 토큰**, 운영 DB 접속 정보, `AI_PROVIDER=nvidia`, `OLLAMA_*`는 비움
-- [ ] `docker compose -f compose.prod.yaml run --rm migrate`로 마이그레이션 적용 후 봇 시작
+- [x] 서버 Rootless Docker Compose에서 운영 흐름 확인 (사용자 확인)
+- [x] `~/app` 저장소·서버 환경 설정 후 운영 시작 (사용자 확인, `.env` 파일 권한·비밀값은 직접 검사하지 않음)
+- [x] 마이그레이션 후 운영 봇 시작 (사용자 확인, 최신 revision 직접 조회는 잔여 작업)
 - [ ] 봇 컨테이너가 1개만 실행 중인지 확인
 - [ ] `restart: unless-stopped` 설정 완료. VM 재부팅 후 자동 시작은 서버 배포 시 확인
-- [ ] 업데이트 절차 정리: `git pull` → 이미지 빌드 → `docker compose -f compose.prod.yaml run --rm migrate` → `docker compose -f compose.prod.yaml up -d bot`
+- [x] 업데이트 절차는 README의 운영 명령만 사용: 서버 변경 확인 → 코드 갱신 → 백업 성공 → `./run.sh`. 실행 중인 봇을 둔 채 마이그레이션하지 않습니다.
 
 ### 2-4. 메모리 제한 (합계 최대 6GB)
 
@@ -164,11 +164,12 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 | --- | --- | --- |
 | `bot` | 512MB | 봇 1개. AI는 외부 API라 모델을 메모리에 올리지 않음 |
 | `postgres` | 1GB | `shared_buffers=256MB`, `effective_cache_size=768MB`, `work_mem=4MB`, `maintenance_work_mem=64MB`, `max_connections=20` |
-| 일회성 작업 (마이그레이션, `pg_dump` 백업) | 512MB | 실행할 때만 사용 |
+| 마이그레이션 컨테이너 | 512MB | 실행할 때만 사용 |
 | `ollama` | 실행 안 함 | 서버에서는 사용하지 않음 |
 | **합계** | **2GB** | 상한 6GB 중 남는 4GB는 측정 결과에 따라 늘릴 여유 |
 
 - [x] `compose.prod.yaml`에 서비스별 메모리 제한 반영, 합계 6GB 이하인지 확인
+- `pg_dump`·아카이브 검사는 postgres 컨테이너 내부에서 실행하므로 DB의 1GB 제한을 공유합니다. 별도 512MB 백업 컨테이너는 없습니다.
 - [ ] 배포 후 하루 정도 `docker stats`로 사용량 확인. 제한에 가까우면 합계 6GB 안에서 늘림
 
 ### 2-5. 운영
@@ -179,8 +180,8 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [ ] 운영 서버에서 자동 백업 등록 후 실제 성공 로그·파일 확인
 - [ ] VM 밖(예: Oracle Object Storage) 보관 및 보존 기간 정책 확정·적용 (현재 자동 삭제 없음)
 - [ ] 백업 복구 시험 1회
-- [ ] 로그 확인 방법 정리 (`seulseul` 계정에서 `docker compose -f compose.prod.yaml logs --tail 200 bot`)
-- [ ] 출시 전 확인: 실제 워크스페이스에서 두 개발자만 알림을 신청한 상태로 전체 흐름 점검
+- [x] 로그 확인 방법 정리: README의 `./view.sh logs`, 백업 journal 확인
+- [x] 실제 워크스페이스의 주요 학생 흐름 점검 (사용자 확인, 참여 인원·세부 실행 증거는 별도 기록)
 
 ### 2-6. 업그레이드 후 남은 정리
 

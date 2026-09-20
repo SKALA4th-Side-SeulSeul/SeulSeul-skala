@@ -6,6 +6,7 @@ NVIDIA Build API와 Ollama가 같은 요청 형식(/v1/chat/completions)을 지�
 제공자 선택은 D-013을 따르고, 호출 파라미터와 오류 분류는 D-017을 따른다.
 """
 
+import math
 from typing import Any, Protocol
 
 import httpx
@@ -14,6 +15,7 @@ import httpx
 ANALYSIS_TEMPERATURE = 0.2
 ANALYSIS_TOP_P = 0.8
 MAX_RESPONSE_TOKENS = 512
+MAX_RETRY_AFTER_SECONDS = 60.0
 # 오류 응답 본문은 원인 파악에 필요한 앞부분만 메시지에 담는다.
 ERROR_BODY_PREVIEW_CHARS = 200
 
@@ -28,11 +30,13 @@ class AiClientError(Exception):
         retryable: bool = True,
         retry_after_seconds: float | None = None,
         retry_count: int = 0,
+        auto_retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
         self.retry_count = retry_count
+        self.auto_retryable = auto_retryable
 
 
 class ChatClient(Protocol):
@@ -80,21 +84,31 @@ class OpenAICompatibleChatClient:
             response = self._http_client.post("chat/completions", json=payload)
         except httpx.TimeoutException as error:
             raise AiClientError(
-                f"AI 응답이 {self._timeout_seconds:g}초 안에 오지 않았습니다. 모델: {self._model}"
+                f"AI 응답이 {self._timeout_seconds:g}초 안에 오지 않았습니다. 모델: {self._model}",
+                auto_retryable=True,
             ) from error
         except httpx.HTTPError as error:
             raise AiClientError(
                 "AI 서버에 연결하지 못했습니다. 주소와 서버 실행 여부를 확인하세요. "
-                f"원인: {type(error).__name__}"
+                f"원인: {type(error).__name__}",
+                auto_retryable=not isinstance(
+                    error, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
+                ),
             ) from error
 
         if not response.is_success:
             retryable = response.status_code == 429 or response.status_code >= 500
+            try:
+                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            except AiClientError as error:
+                error.auto_retryable = retryable
+                raise
             raise AiClientError(
                 f"AI 서버가 오류를 반환했습니다. 상태 코드: {response.status_code}, "
                 f"모델: {self._model}, 응답: {response.text[:ERROR_BODY_PREVIEW_CHARS]}",
                 retryable=retryable,
-                retry_after_seconds=_parse_retry_after(response.headers.get("Retry-After")),
+                retry_after_seconds=retry_after,
+                auto_retryable=retryable,
             )
 
         try:
@@ -119,4 +133,9 @@ def _parse_retry_after(raw_value: str | None) -> float | None:
         seconds = float(raw_value)
     except ValueError:
         return None
-    return seconds if seconds >= 0 else None
+    if not math.isfinite(seconds) or seconds < 0 or seconds > MAX_RETRY_AFTER_SECONDS:
+        raise AiClientError(
+            "AI 재시도 대기시간이 유효하지 않거나 상한 60초를 초과했습니다.",
+            retryable=False,
+        )
+    return seconds

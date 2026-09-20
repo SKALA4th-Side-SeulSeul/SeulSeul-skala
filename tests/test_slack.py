@@ -34,6 +34,7 @@ from seulseul.slack.handlers import (
     create_checklist_action_handler,
     create_message_event_handler,
     create_seulseul_command_handler,
+    create_user_change_handler,
     register_checklist_handlers,
     register_handlers,
 )
@@ -59,6 +60,25 @@ def test_withdrawal_confirmation_is_normal_dm_not_ephemeral(deleted):
     assert payload["channel"] == "DTEST"
     assert "response_type" not in payload
     assert ("해지가 완료" if deleted else "가입되어 있지") in payload["text"]
+
+
+def test_invalid_name_guidance_is_normal_dm_and_command_only_acks():
+    client = cleanup_client()
+    repository = InMemoryStudentRepository()
+    service = StudentService(
+        repository, on_invalid_name=SlackChecklistClient(client).send_enrollment_guidance
+    )
+    handler = create_seulseul_command_handler(service, Mock(get_real_name=lambda user: "불일치"))
+    ack, respond = Mock(), Mock()
+    handler(ack, respond, {**COMMAND, "text": "시작"}, logging.getLogger("test"))
+    ack.assert_called_once_with()
+    respond.assert_not_called()
+    client.chat_postEphemeral.assert_not_called()
+    client.chat_delete.assert_not_called()
+    payload = client.chat_postMessage.call_args.kwargs
+    assert payload["channel"] == "DTEST"
+    assert "성명" in payload["text"] and "/seulseul 시작" in payload["text"]
+    assert repository.get(WORKSPACE_ID, USER_ID) is None
 
 
 @pytest.mark.parametrize("code", ["message_not_found", "ratelimited"])
@@ -188,6 +208,42 @@ class FakeUserProfileProvider:
     def get_real_name(self, user_id: str) -> str:
         self.calls.append(user_id)
         return self.real_name
+
+
+def test_user_change_uses_current_real_name_not_event_payload():
+    repository = InMemoryStudentRepository()
+    service = StudentService(repository)
+    service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_가상학생")
+    provider = FakeUserProfileProvider("4기_광주_1반_가상학생")
+    handler = create_user_change_handler(service, provider)
+    handler(
+        {
+            "type": "user_change",
+            "user": {"id": USER_ID, "profile": {"real_name": "4기_광주_2반_과거"}},
+        },
+        {"team_id": WORKSPACE_ID},
+        {"team_id": WORKSPACE_ID},
+        logging.getLogger("test"),
+    )
+    assert repository.get(WORKSPACE_ID, USER_ID).class_number == 1
+    assert provider.calls == [USER_ID]
+
+
+@pytest.mark.parametrize(
+    "user,body,context",
+    [
+        (None, {"team_id": WORKSPACE_ID}, {}),
+        ({"id": "bad"}, {"team_id": WORKSPACE_ID}, {}),
+        ({"id": USER_ID}, {}, {}),
+        ({"id": USER_ID}, {"team_id": WORKSPACE_ID}, {"team_id": "TOTHER"}),
+    ],
+)
+def test_user_change_invalid_identifiers_do_not_call_service(user, body, context):
+    service = Mock()
+    create_user_change_handler(service, Mock())(
+        {"type": "user_change", "user": user}, body, context, logging.getLogger("test")
+    )
+    service.sync_profile.assert_not_called()
 
 
 class FailingUserProfileProvider:
@@ -434,7 +490,7 @@ def test_message_handler_fetches_permalink_only_for_accepted_messages() -> None:
     assert service.recent_notices(5)[0].source_permalink == PERMALINK
 
 
-def test_message_handler_skips_notice_when_permalink_lookup_fails() -> None:
+def test_message_handler_records_failure_when_permalink_lookup_fails() -> None:
     service = NoticeService({CHANNEL_ID})
     handler = create_message_event_handler(service, FailingPermalinkProvider())
 
@@ -445,7 +501,11 @@ def test_message_handler_skips_notice_when_permalink_lookup_fails() -> None:
         logging.getLogger("test"),
     )
 
-    assert service.recent_notices(5) == []
+    notices = service.failed_notices(5)
+    assert len(notices) == 1
+    assert notices[0].source_permalink == ""
+    assert notices[0].analysis is None
+    assert "원문 링크 조회 실패" in notices[0].last_error
 
 
 def edited_event(text, **overrides):

@@ -29,10 +29,10 @@ from seulseul.config import (
 )
 from seulseul.database import create_database_engine, create_session_factory
 from seulseul.jobs.scheduler import ChecklistScheduler
-from seulseul.jobs.tasks import refresh_checklists
+from seulseul.jobs.tasks import refresh_checklists, retry_notices
 from seulseul.notices.repository import NoticeRepository, SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeService
-from seulseul.slack.client import SlackChecklistClient
+from seulseul.slack.client import SlackChecklistClient, SlackWebApiClient
 from seulseul.slack.handlers import register_checklist_handlers, register_handlers
 from seulseul.users.repository import SqlAlchemyStudentRepository
 from seulseul.users.service import StudentService
@@ -45,6 +45,7 @@ def create_notice_service(
     notice_channel_ids: tuple[str, ...],
     repository: NoticeRepository,
     on_change: Callable[[], None] = lambda: None,
+    permalink_resolver: Callable[[str, str], str] | None = None,
 ) -> NoticeService:
     if ai_settings is None:
         logger.info("AI_PROVIDER가 비어 있어 원문 링크만 수집합니다.")
@@ -71,6 +72,7 @@ def create_notice_service(
         analyzer=NoticeAnalyzer(client),
         repository=repository,
         on_change=on_change,
+        permalink_resolver=permalink_resolver,
     )
 
 
@@ -108,12 +110,13 @@ def main() -> None:
         slack_settings.notice_channels,
         notice_repository,
         (wakeup := Event()).set,
+        SlackWebApiClient.from_token(slack_settings.bot_token).get_message_permalink,
     )
     messenger = SlackChecklistClient.from_token(slack_settings.bot_token)
     checklist_service = DailyChecklistService(
         SqlAlchemyChecklistRepository(session_factory),
         messenger,
-        messenger.workspace_id(),
+        (workspace_id := messenger.workspace_id()),
         notice_targets,
         notify=wakeup.set,
     )
@@ -122,6 +125,8 @@ def main() -> None:
         on_change=wakeup.set,
         reset_messages=checklist_service.reset_messages,
         on_withdraw=messenger.send_withdrawal,
+        on_invalid_name=messenger.send_enrollment_guidance,
+        profile_update=checklist_service.profile_update,
     )
     app = create_app(slack_settings, notice_service, student_service)
     register_checklist_handlers(app, checklist_service)
@@ -129,15 +134,21 @@ def main() -> None:
         lambda: refresh_checklists(checklist_service, scheduler.stopped.is_set),
         wakeup,
     )
+    retry_scheduler = ChecklistScheduler(
+        lambda: retry_notices(notice_service, workspace_id, retry_scheduler.stopped.is_set),
+        Event(),
+    )
     logger.info(
         "Socket Mode로 Slack에 연결합니다. 공지 채널 설정 %d개",
         len(slack_settings.notice_channels),
     )
     scheduler.start()
+    retry_scheduler.start()
     try:
         SocketModeHandler(app, slack_settings.app_token).start()
     finally:
         scheduler.stop()
+        retry_scheduler.stop()
         engine.dispose()
 
 

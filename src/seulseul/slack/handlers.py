@@ -74,12 +74,10 @@ def _enroll_student(
     logger: logging.Logger,
 ) -> None:
     try:
-        real_name = profile_provider.get_real_name(user_id)
+        student_service.enroll_from_profile(workspace_id, user_id, profile_provider.get_real_name)
     except UserProfileError:
         logger.warning("가입 실패: Slack 성명 조회 실패; users:read 권한·프로필 확인 필요")
         return
-    try:
-        student_service.enroll(workspace_id, user_id, real_name)
     except InvalidStudentRealNameError:
         logger.warning("가입 실패: Slack 성명 형식 불일치")
         return
@@ -115,6 +113,8 @@ def create_message_event_handler(
             return
 
         source_permalink = ""
+        collection_error = None
+        collection_retryable = False
         if notice_service.needs_permalink(parsed):
             source_permalink = notice_service.stored_permalink(workspace_id, parsed) or ""
             if not source_permalink:
@@ -129,7 +129,12 @@ def create_message_event_handler(
                         parsed.message_ts,
                         error,
                     )
-                    return
+                    collection_error = "Slack 원문 링크 조회 실패: 운영자 CLI로 재처리해 주세요."
+                    collection_retryable = error.auto_retryable
+                    if collection_retryable:
+                        collection_error = (
+                            "Slack 원문 링크 일시 조회 실패: 자동 재처리 예약 대상입니다."
+                        )
 
         notices = notice_service.record_channel_message(
             event,
@@ -137,6 +142,8 @@ def create_message_event_handler(
             source_permalink=source_permalink,
             bot_user_id=bot_user_id,
             bot_id=bot_id,
+            collection_error=collection_error,
+            collection_retryable=collection_retryable,
         )
         logger.info(
             "메시지 이벤트 처리: channel=%s ts=%s notices=%d processed=%d failed=%d",
@@ -150,6 +157,32 @@ def create_message_event_handler(
     return handle_message_event
 
 
+def create_user_change_handler(
+    student_service: StudentService, profile_provider: UserProfileProvider
+) -> Callable[..., None]:
+    def handle_user_change(event, body, context, logger):
+        if event.get("type") != "user_change":
+            return
+        user = event.get("user")
+        if not isinstance(user, Mapping):
+            return
+        user_id = user.get("id")
+        workspace_id = body.get("team_id") or context.get("team_id")
+        if not isinstance(user_id, str) or not re.fullmatch(r"[UW][A-Z0-9]+", user_id):
+            return
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+        if context.get("team_id") and context["team_id"] != workspace_id:
+            return
+        try:
+            student_service.sync_profile(workspace_id, user_id, profile_provider.get_real_name)
+        except Exception as error:
+            # 성명/예외 본문에는 개인정보가 있을 수 있으므로 종류만 기록한다.
+            logger.warning("학생 소속 동기화 실패: type=%s", type(error).__name__)
+
+    return handle_user_change
+
+
 def register_handlers(
     app: App,
     notice_service: NoticeService,
@@ -160,6 +193,7 @@ def register_handlers(
         create_seulseul_command_handler(student_service, permalink_provider)
     )
     app.event("message")(create_message_event_handler(notice_service, permalink_provider))
+    app.event("user_change")(create_user_change_handler(student_service, permalink_provider))
 
 
 def create_checklist_action_handler(service: DailyChecklistService) -> Callable[..., None]:

@@ -58,6 +58,14 @@ class DailyChecklistService:
         self._delivery_lock = RLock()
 
     @contextmanager
+    def profile_update(self, workspace_id: str, user_id: str) -> Iterator[None]:
+        """반 변경과 기존 DM 편집을 직렬화한다. 메시지·발송 기록을 삭제하지 않는다."""
+        if workspace_id != self._workspace_id:
+            raise ChecklistDeliveryError("invalid_workspace")
+        with self._delivery_lock:
+            yield
+
+    @contextmanager
     def reset_messages(self, workspace_id: str, user_id: str) -> Iterator[None]:
         if workspace_id != self._workspace_id:
             raise ChecklistDeliveryError("invalid_workspace")
