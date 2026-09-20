@@ -42,6 +42,10 @@ class SlackWebClientProtocol(Protocol):
 class MessagePermalinkError(Exception):
     """Slack 원본 메시지 링크를 가져오지 못했을 때 발생한다."""
 
+    def __init__(self, message: str, *, auto_retryable: bool = False) -> None:
+        super().__init__(message)
+        self.auto_retryable = auto_retryable
+
 
 class UserProfileError(Exception):
     """Slack 사용자의 성명을 가져오지 못했을 때 발생한다."""
@@ -51,12 +55,27 @@ class SlackWebApiClient:
     def __init__(self, client: SlackWebClientProtocol) -> None:
         self._client = client
 
+    @classmethod
+    def from_token(cls, token: str) -> "SlackWebApiClient":
+        return cls(WebClient(token=token, timeout=10, retry_handlers=[]))
+
     def get_message_permalink(self, channel_id: str, message_ts: str) -> str:
         try:
             response = self._client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
-        except SlackClientError as error:
+        except SlackApiError as error:
             raise MessagePermalinkError(
-                f"Slack 원문 링크를 가져오지 못했습니다: {type(error).__name__}"
+                "Slack 원문 링크 조회에 실패했습니다.",
+                auto_retryable=(
+                    error.response.status_code == 429
+                    or (error.response.status_code or 0) >= 500
+                    or error.response.get("error")
+                    in {"ratelimited", "internal_error", "request_timeout"}
+                ),
+            ) from error
+        except (SlackClientError, OSError) as error:
+            raise MessagePermalinkError(
+                f"Slack 원문 링크를 가져오지 못했습니다: {type(error).__name__}",
+                auto_retryable=True,
             ) from error
         permalink = response.get("permalink")
         if not isinstance(permalink, str) or not permalink:
@@ -139,6 +158,18 @@ class SlackChecklistClient:
 
     def send_withdrawal(self, user_id: str, deleted: bool) -> None:
         """해지 처리 후 일반 DM으로 안내한다. 임시 응답과 자동 재전송은 사용하지 않는다."""
+        self._send_plain_dm(
+            user_id,
+            "SeulSeul 해지가 완료되었습니다. 다시 이용하려면 `/seulseul 시작`을 입력해 주세요."
+            if deleted
+            else "현재 SeulSeul에 가입되어 있지 않습니다.",
+        )
+
+    def send_enrollment_guidance(self, user_id: str, guidance: str) -> None:
+        """성명 불일치 안내만 일반 DM으로 보낸다. 기존 메시지는 정리하지 않는다."""
+        self._send_plain_dm(user_id, guidance)
+
+    def _send_plain_dm(self, user_id: str, text: str) -> None:
         opened = self._call("conversations_open", users=user_id)
         channel = opened.get("channel")
         channel_id = channel.get("id") if isinstance(channel, Mapping) else None
@@ -148,9 +179,7 @@ class SlackChecklistClient:
             "chat_postMessage",
             posting=True,
             channel=channel_id,
-            text="SeulSeul 해지가 완료되었습니다. 다시 이용하려면 `/seulseul 시작`을 입력해 주세요."
-            if deleted
-            else "현재 SeulSeul에 가입되어 있지 않습니다.",
+            text=text,
             unfurl_links=False,
             unfurl_media=False,
         )

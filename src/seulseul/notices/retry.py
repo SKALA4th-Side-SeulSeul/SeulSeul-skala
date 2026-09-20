@@ -1,4 +1,4 @@
-"""운영자용 실패 공지 조회·선택 재처리 명령. Slack 연결은 새로 만들지 않는다."""
+"""운영자용 실패 공지 조회·선택 재처리. 봇은 시작하지 않고 필요 시 원문 링크만 조회한다."""
 
 import argparse
 import logging
@@ -19,6 +19,7 @@ from seulseul.config import (
 from seulseul.database import create_database_engine, create_session_factory
 from seulseul.notices.repository import SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeRetryError, NoticeService
+from seulseul.slack.client import SlackWebApiClient
 
 
 def _positive_limit(raw: str) -> int:
@@ -39,6 +40,23 @@ def _safe_error(message: str | None) -> str:
 
 
 def run_command(service: NoticeService, args: argparse.Namespace) -> int:
+    if args.action == "pending":
+        sources = service.pending_sources(args.limit, workspace_id=args.workspace_id)
+        if not sources:
+            print("현재 설정된 채널에 미적용 원본이 없습니다.")
+            return 0
+        for workspace, channel, message_ts in sources:
+            print(f"워크스페이스: {workspace} · 채널: {channel} · 메시지 ts: {message_ts}")
+        print(
+            "미적용 원본에는 정상 처리 중인 이벤트도 포함됩니다. 잠시 후 다시 조회하세요.\n"
+            "이벤트 원문이 보관되어 있지 않아 이 명령으로 자동 복구할 수 없습니다. "
+            "계속 남아 있는 원본은 Slack에서 내용을 확인하고 실제로 다시 수정해 주세요. "
+            "삭제된 원본은 수정할 수 없으므로 운영자가 별도로 상태를 확인해야 합니다. "
+            "기존 본문 강제 재처리나 DB 상태 초기화는 수행하지 않습니다."
+        )
+        if len(sources) == args.limit:
+            print("조회 한도에 도달했습니다. --limit 또는 --workspace-id로 범위를 조정하세요.")
+        return 0
     if args.action == "list":
         notices = service.failed_notices(args.limit, workspace_id=args.workspace_id)
         if not notices:
@@ -46,8 +64,14 @@ def run_command(service: NoticeService, args: argparse.Namespace) -> int:
             return 0
         for notice in notices:
             print(f"워크스페이스: {notice.workspace_id}")
-            print(f"원문: {notice.source_permalink}")
+            print(f"원문: {notice.source_permalink or '조회 실패 — 재처리 시 다시 조회합니다.'}")
             print(f"실패 원인: {_safe_error(notice.last_error)}")
+            print(
+                f"자동 재처리 예약: {notice.next_retry_at.isoformat()} · "
+                f"실행 {notice.retry_count}/3회"
+                if notice.next_retry_at
+                else "자동 재처리 예약 없음 (수동 확인 대상)"
+            )
             print(
                 "재처리 명령: "
                 + shlex.join(
@@ -94,6 +118,11 @@ def main(argv: list[str] | None = None) -> int:
     listing = commands.add_parser("list", help="실패 공지와 재처리 명령 조회 (AI 호출 없음)")
     listing.add_argument("--workspace-id")
     listing.add_argument("--limit", type=_positive_limit, default=20)
+    pending = commands.add_parser(
+        "pending", help="미적용 원본 식별자 조회 (상태 변경·AI 호출 없음)"
+    )
+    pending.add_argument("--workspace-id")
+    pending.add_argument("--limit", type=_positive_limit, default=20)
     retrying = commands.add_parser("retry", help="선택한 실패 공지 하나 재처리")
     retrying.add_argument("--workspace-id", required=True)
     retrying.add_argument("--url", required=True, help="공지의 제출 링크 (Slack 원문 링크 아님)")
@@ -105,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.ERROR)
     try:
         with ExitStack() as resources:
-            channels = load_slack_settings().notice_channels
+            slack_settings = load_slack_settings()
+            channels = slack_settings.notice_channels
             engine = create_database_engine(load_database_settings())
             resources.callback(engine.dispose)
             repository = SqlAlchemyNoticeRepository(create_session_factory(engine))
@@ -123,7 +153,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 resources.callback(client.close)
                 analyzer = NoticeAnalyzer(client)
-            service = NoticeService(channels, analyzer=analyzer, repository=repository)
+            service = NoticeService(
+                channels,
+                analyzer=analyzer,
+                repository=repository,
+                permalink_resolver=SlackWebApiClient.from_token(
+                    slack_settings.bot_token
+                ).get_message_permalink
+                if args.action == "retry"
+                else None,
+            )
             return run_command(service, args)
     except (ConfigError, NoticeRetryError) as error:
         print(_safe_error(str(error)))

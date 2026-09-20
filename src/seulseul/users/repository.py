@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,10 @@ class StudentRepository(Protocol):
     def save(self, student: Student) -> None: ...
 
     def delete(self, workspace_id: str, slack_user_id: str) -> bool: ...
+
+    def get(self, workspace_id: str, slack_user_id: str) -> Student | None: ...
+
+    def update_profile(self, previous: Student, current: Student) -> bool: ...
 
 
 class InMemoryStudentRepository:
@@ -43,12 +47,59 @@ class InMemoryStudentRepository:
         with self._lock:
             return self._students.get((workspace_id, slack_user_id))
 
+    def update_profile(self, previous: Student, current: Student) -> bool:
+        key = (previous.workspace_id, previous.slack_user_id)
+        with self._lock:
+            if self._students.get(key) != previous:
+                return False
+            self._students[key] = current
+            return True
+
 
 class SqlAlchemyStudentRepository:
     """PostgreSQL에 가입 학생을 저장하고 삭제한다."""
 
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._session_factory = session_factory
+
+    def get(self, workspace_id: str, slack_user_id: str) -> Student | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(StudentModel).where(
+                    StudentModel.workspace_id == workspace_id,
+                    StudentModel.slack_user_id == slack_user_id,
+                )
+            )
+            return (
+                Student(
+                    row.workspace_id, row.slack_user_id, row.real_name, row.campus, row.class_number
+                )
+                if row is not None
+                else None
+            )
+
+    def update_profile(self, previous: Student, current: Student) -> bool:
+        # UPSERT 금지: 조회 후 해지됐다면 재가입시키지 않는다. 기존 PK/완료 기록 유지.
+        statement = (
+            update(StudentModel)
+            .where(
+                StudentModel.workspace_id == previous.workspace_id,
+                StudentModel.slack_user_id == previous.slack_user_id,
+                StudentModel.real_name == previous.real_name,
+                StudentModel.campus == previous.campus,
+                StudentModel.class_number == previous.class_number,
+            )
+            .values(
+                real_name=current.real_name,
+                campus=current.campus,
+                class_number=current.class_number,
+            )
+            .returning(StudentModel.id)
+        )
+        with self._session_factory() as session:
+            changed = session.execute(statement).scalar_one_or_none() is not None
+            session.commit()
+            return changed
 
     def save(self, student: Student) -> None:
         statement = (

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Protocol, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,14 @@ class NoticeRepository(Protocol):
     """공지 서비스가 사용하는 저장소 계약."""
 
     def contains(self, workspace_id: str, canonical_url: str) -> bool: ...
+
+    def due_retries(
+        self, now: datetime, channel_ids: Collection[str], workspace_id: str, limit: int
+    ) -> list[Notice]: ...
+
+    def pending_sources(
+        self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
+    ) -> list[tuple[str, str, str]]: ...
 
     def add(self, notice: Notice) -> bool: ...
 
@@ -78,6 +86,42 @@ class InMemoryNoticeRepository:
             return any(
                 key[0] == workspace_id and key[3] == canonical_url for key in self._canonical_urls
             )
+
+    def due_retries(self, now, channel_ids, workspace_id, limit):
+        with self._lock:
+            return sorted(
+                (
+                    n
+                    for n in self._notices
+                    if n.workspace_id == workspace_id
+                    and n.channel_id in channel_ids
+                    and n.deleted_at is None
+                    and n.processing_status == "processing_failed"
+                    and n.next_retry_at is not None
+                    and n.next_retry_at <= now
+                    and n.retry_count < 3
+                    and (
+                        self._sources.get(_source_key(n)) is None
+                        or (
+                            self._sources[_source_key(n)][2]
+                            and not self._sources[_source_key(n)][1]
+                        )
+                    )
+                ),
+                key=lambda n: n.next_retry_at,
+            )[:limit]
+
+    def pending_sources(
+        self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        with self._lock:
+            return sorted(
+                key
+                for key, state in self._sources.items()
+                if not state[2]
+                and key[1] in channel_ids
+                and (workspace_id is None or key[0] == workspace_id)
+            )[:limit]
 
     def add(self, notice: Notice) -> bool:
         identity = (*_source_key(notice), notice.canonical_url)
@@ -210,6 +254,50 @@ class SqlAlchemyNoticeRepository:
 
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._session_factory = session_factory
+
+    def due_retries(self, now, channel_ids, workspace_id, limit):
+        statement = (
+            select(NoticeModel)
+            .outerjoin(
+                NoticeSourceModel,
+                and_(
+                    NoticeSourceModel.workspace_id == NoticeModel.workspace_id,
+                    NoticeSourceModel.channel_id == NoticeModel.channel_id,
+                    NoticeSourceModel.message_ts == NoticeModel.message_ts,
+                ),
+            )
+            .where(
+                NoticeModel.workspace_id == workspace_id,
+                NoticeModel.channel_id.in_(channel_ids),
+                NoticeModel.processing_status == "processing_failed",
+                NoticeModel.deleted_at.is_(None),
+                NoticeModel.next_retry_at <= now,
+                NoticeModel.retry_count < 3,
+                or_(
+                    NoticeSourceModel.workspace_id.is_(None),
+                    and_(NoticeSourceModel.applied.is_(True), NoticeSourceModel.deleted.is_(False)),
+                ),
+            )
+            .order_by(NoticeModel.next_retry_at, NoticeModel.id)
+            .limit(limit)
+        )
+        with self._session_factory() as session:
+            return [_to_notice(n) for n in session.execute(statement).scalars().all()]
+
+    def pending_sources(
+        self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        model = NoticeSourceModel
+        statement = select(model.workspace_id, model.channel_id, model.message_ts).where(
+            model.applied.is_(False), model.channel_id.in_(channel_ids)
+        )
+        if workspace_id is not None:
+            statement = statement.where(model.workspace_id == workspace_id)
+        statement = statement.order_by(
+            model.workspace_id, model.channel_id, model.message_ts
+        ).limit(limit)
+        with self._session_factory() as session:
+            return [tuple(row) for row in session.execute(statement)]
 
     def contains(self, workspace_id: str, canonical_url: str) -> bool:
         statement = (
@@ -395,6 +483,7 @@ class SqlAlchemyNoticeRepository:
         # 분석 중 다른 요청이 성공했거나 원문·삭제 상태가 바뀌면 덮어쓰지 않는다.
         values = _notice_values(result)
         analysis_fields = (
+            "source_permalink",
             "title",
             "summary",
             "deadline_at",
@@ -417,6 +506,7 @@ class SqlAlchemyNoticeRepository:
                 NoticeModel.deleted_at.is_(None),
                 NoticeModel.last_error == original.last_error,
                 NoticeModel.retry_count == original.retry_count,
+                NoticeModel.next_retry_at == original.next_retry_at,
             )
             .values(**{field: values[field] for field in analysis_fields})
             .returning(NoticeModel.id)

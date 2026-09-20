@@ -740,6 +740,44 @@ def test_unauthorized_and_stale_buttons_cannot_change_state(daily_system, case):
         assert checklist is None or checklist.completed_at is None
 
 
+@pytest.mark.parametrize("old_class,new_class", [(3, 1), (2, 4)])
+def test_live_profile_change_keeps_dm_and_completion_and_reassigns_class(
+    daily_system, old_class, new_class
+):
+    from seulseul.users.repository import SqlAlchemyStudentRepository
+    from seulseul.users.service import StudentService
+
+    factory, repository, messenger, clock, _ = daily_system
+    student_id = add_student(factory, class_number=old_class)
+    targets = {"CALL": None, "COLD": old_class, "CNEW": new_class}
+    service = DailyChecklistService(
+        repository, messenger, WORKSPACE, targets, clock=lambda: clock[0]
+    )
+    add_notice(factory, channel_id="COLD", title="이전 반")
+    add_notice(factory, channel_id="CNEW", title="새 반")
+    add_notice(factory, title="전체 공지")
+    service.run_due()
+    daily = get_daily(factory)[0]
+    old_item = next(item for item in messenger.sent[0][1].items if item.title == "이전 반")
+    click(service, daily, "complete", old_item.id)
+    users = StudentService(
+        SqlAlchemyStudentRepository(factory), profile_update=service.profile_update
+    )
+    assert users.sync_profile(WORKSPACE, "UONE", lambda user: f"4기_광주_{new_class}반_가상학생")
+    service.run_due()
+    assert len(messenger.sent) == 1
+    assert {i.title for i in messenger.updated[-1][2].items} == {"새 반", "전체 공지"}
+    current = get_daily(factory)[0]
+    assert (current.id, current.dm_channel_id, current.message_ts) == (
+        daily.id,
+        daily.dm_channel_id,
+        daily.message_ts,
+    )
+    with factory() as session:
+        assert session.get(StudentModel, student_id).class_number == new_class
+        assert session.get(ChecklistModel, old_item.id).completed_at is not None
+
+
 def test_expiry_and_class_change_refresh_visibility_without_resetting_completion(daily_system):
     factory, _, messenger, clock, service = daily_system
     student_id = add_student(factory)

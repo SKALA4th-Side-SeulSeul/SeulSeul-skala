@@ -5,8 +5,10 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import CheckConstraint, UniqueConstraint
+from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine
+from sqlalchemy.orm import sessionmaker
 
+from seulseul.database import Base
 from seulseul.users.model import Student, StudentModel
 from seulseul.users.repository import InMemoryStudentRepository, SqlAlchemyStudentRepository
 from seulseul.users.service import (
@@ -18,6 +20,65 @@ from seulseul.users.service import (
 
 WORKSPACE_ID = "T0000000001"
 USER_ID = "U0000000001"
+
+
+@pytest.fixture(params=["memory", "sql"])
+def profile_repository(request):
+    if request.param == "memory":
+        yield InMemoryStudentRepository()
+    else:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        yield SqlAlchemyStudentRepository(sessionmaker(engine))
+        engine.dispose()
+
+
+@pytest.mark.parametrize("previous,current", [(3, 1), (2, 4)])
+def test_profile_sync_updates_existing_student_without_enroll_or_message_reset(
+    profile_repository, previous, current
+):
+    service = StudentService(profile_repository)
+    service.enroll(WORKSPACE_ID, USER_ID, f"4기_광주_{previous}반_가상학생")
+    cleanup, notify = MagicMock(), MagicMock()
+    service = StudentService(profile_repository, reset_messages=cleanup, on_change=notify)
+    fetch = MagicMock(return_value=f"4기_광주_{current}반_가상학생")
+    assert service.sync_profile(WORKSPACE_ID, USER_ID, fetch)
+    assert profile_repository.get(WORKSPACE_ID, USER_ID).class_number == current
+    notify.assert_called_once_with()
+    cleanup.assert_not_called()
+    assert not service.sync_profile(WORKSPACE_ID, USER_ID, fetch)
+    notify.assert_called_once_with()
+
+
+def test_profile_sync_does_not_fetch_or_enroll_unregistered_students(profile_repository):
+    fetch = MagicMock()
+    service = StudentService(profile_repository)
+    assert not service.sync_profile(WORKSPACE_ID, USER_ID, fetch)
+    fetch.assert_not_called()
+
+
+def test_profile_sync_never_recreates_a_student_deleted_during_lookup(profile_repository):
+    service = StudentService(profile_repository)
+    service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_가상학생")
+
+    def fetch(user):
+        profile_repository.delete(WORKSPACE_ID, user)
+        return "4기_광주_1반_가상학생"
+
+    assert not service.sync_profile(WORKSPACE_ID, USER_ID, fetch)
+    assert profile_repository.get(WORKSPACE_ID, USER_ID) is None
+
+
+@pytest.mark.parametrize("failure", ["invalid", "lookup"])
+def test_profile_sync_failure_preserves_existing_student(profile_repository, failure):
+    service = StudentService(profile_repository)
+    original = service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_가상학생")
+    fetch = MagicMock(return_value="invalid")
+    if failure == "lookup":
+        fetch.side_effect = RuntimeError("network")
+    with pytest.raises((InvalidStudentRealNameError, RuntimeError)):
+        service.sync_profile(WORKSPACE_ID, USER_ID, fetch)
+    assert profile_repository.get(WORKSPACE_ID, USER_ID) == original
 
 
 def test_commands_cleanup_inside_guard_and_invalid_profile_does_not_delete():
@@ -108,6 +169,33 @@ def test_student_service_withdraws_personal_student_record() -> None:
     assert service.withdraw(WORKSPACE_ID, USER_ID)
     assert repository.get(WORKSPACE_ID, USER_ID) is None
     assert not service.withdraw(WORKSPACE_ID, USER_ID)
+
+
+def test_invalid_name_notifies_without_resetting_existing_student():
+    repository = InMemoryStudentRepository()
+    original = StudentService(repository).enroll(WORKSPACE_ID, USER_ID, "4기_광주_1반_가상학생")
+    reset = MagicMock()
+    notify = MagicMock()
+    service = StudentService(repository, reset_messages=reset, on_invalid_name=notify)
+    with pytest.raises(InvalidStudentRealNameError):
+        service.enroll(WORKSPACE_ID, USER_ID, "형식 불일치")
+    reset.assert_not_called()
+    assert repository.get(WORKSPACE_ID, USER_ID) == original
+    user, guidance = notify.call_args.args
+    assert user == USER_ID
+    assert "성명" in guidance and "4기_광주_<1~4>반_<이름>" in guidance
+    assert "/seulseul 시작" in guidance
+
+
+def test_invalid_name_dm_failure_does_not_expose_content_or_change_student(caplog):
+    repository = InMemoryStudentRepository()
+    notify = MagicMock(side_effect=RuntimeError("sensitive token and name"))
+    service = StudentService(repository, on_invalid_name=notify)
+    with pytest.raises(InvalidStudentRealNameError):
+        service.enroll(WORKSPACE_ID, USER_ID, "형식 불일치")
+    assert repository.get(WORKSPACE_ID, USER_ID) is None
+    assert "RuntimeError" in caplog.text
+    assert "sensitive token" not in caplog.text
 
 
 def test_withdrawal_notification_follows_deletion_and_start_has_no_notification():
