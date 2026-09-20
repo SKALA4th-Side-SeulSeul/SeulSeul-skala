@@ -28,6 +28,9 @@ def operations(tmp_path, monkeypatch):
         "stop.sh",
         "view.sh",
         "backup.sh",
+        "backup_run.sh",
+        "backup_stop.sh",
+        "scripts/scheduling.sh",
         "scripts/operations.sh",
         ".env.example",
     ):
@@ -227,3 +230,107 @@ def test_backup_rejects_symlink_destination_and_unknown_option(operations):
     assert run("backup.sh", "--delete").returncode == 2
     assert run("backup.sh", "--help").returncode == 0
     assert len(calls()) == count
+
+
+@pytest.fixture
+def scheduling(operations, monkeypatch):
+    repo, run, calls = operations
+    config = repo.parent / "user-config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    binaries = repo.parent / "bin"
+    for name, body in {
+        "systemctl": """printf '%s\\n' "$*" >> systemctl-calls
+if [[ -f fail-systemctl && "$*" == *"$(cat fail-systemctl)"* ]]; then exit 19; fi
+""",
+        "loginctl": "if [[ -f no-linger ]]; then echo no; else echo yes; fi\n",
+    }.items():
+        binary = binaries / name
+        binary.write_text("#!/usr/bin/env bash\nset -eu\n" + body)
+        binary.chmod(0o700)
+    return repo, run, calls, config / "systemd/user"
+
+
+def test_schedule_is_daily_korean_time_private_and_repeatable(scheduling):
+    repo, run, calls, units = scheduling
+    for _ in range(2):
+        result = run("backup_run.sh")
+        assert result.returncode == 0, result.stderr
+    service = units / "seulseul-db-backup.service"
+    timer = units / "seulseul-db-backup.timer"
+    assert service.stat().st_mode & 0o777 == 0o600
+    assert timer.stat().st_mode & 0o777 == 0o600
+    assert 'ExecStart=/bin/bash "' + str(repo / "backup.sh") + '"' in service.read_text()
+    assert 'Environment="DOCKER_HOST=unix://%t/docker.sock"' in service.read_text()
+    assert 'Environment="DOCKER_CONTEXT="' in service.read_text()
+    assert "OnCalendar=*-*-* 03:00:00 Asia/Seoul" in timer.read_text()
+    assert "Persistent=true" in timer.read_text()
+    assert sorted(p.name for p in units.iterdir()) == [service.name, timer.name]
+    commands = (repo / "systemctl-calls").read_text()
+    assert commands.count("--user enable seulseul-db-backup.timer\n") == 2
+    assert commands.count("--user restart seulseul-db-backup.timer\n") == 2
+    assert not any("exec pg_dump" in line or " up " in line for line in calls())
+
+
+def test_stop_disables_only_timer_even_without_database_configuration(scheduling):
+    repo, run, calls, units = scheduling
+    assert run("backup_run.sh").returncode == 0
+    (repo / ".env").unlink()
+    (repo / "no-linger").touch()
+    before = calls()
+    for _ in range(2):
+        assert run("backup_stop.sh").returncode == 0
+    assert calls() == before
+    commands = (repo / "systemctl-calls").read_text()
+    assert "--user disable --now seulseul-db-backup.timer" in commands
+    assert "stop seulseul-db-backup.service" not in commands
+    assert (units / "seulseul-db-backup.service").exists()
+
+
+def test_schedule_requires_linger_and_preserves_foreign_units(scheduling):
+    repo, run, _, units = scheduling
+    (repo / "no-linger").touch()
+    result = run("backup_run.sh")
+    assert result.returncode != 0
+    assert "enable-linger" in result.stderr
+    assert not units.exists()
+    (repo / "no-linger").unlink()
+    units.mkdir(parents=True)
+    timer = units / "seulseul-db-backup.timer"
+    timer.write_text("# someone else's timer\n")
+    for script in ("backup_run.sh", "backup_stop.sh"):
+        assert run(script).returncode != 0
+        assert timer.read_text() == "# someone else's timer\n"
+    timer.unlink()
+    timer.symlink_to(repo / ".env")
+    assert run("backup_run.sh").returncode != 0
+    assert (repo / ".env").read_text() == "SECRET=never_print_this\n"
+
+
+def test_schedule_errors_do_not_report_success(scheduling):
+    repo, run, _, _ = scheduling
+    (repo / "fail-systemctl").write_text("enable")
+    result = run("backup_run.sh")
+    assert result.returncode == 19
+    assert "등록 완료" not in result.stdout
+
+
+def test_schedule_help_invalid_arguments_and_absent_stop(scheduling):
+    repo, run, calls, _ = scheduling
+    for script in ("backup_run.sh", "backup_stop.sh"):
+        assert run(script, "--help").returncode == 0
+        assert run(script, "--delete").returncode == 2
+    assert calls() == []
+    assert not (repo / "systemctl-calls").exists()
+    assert run("backup_stop.sh").returncode == 0
+
+
+def test_schedule_escapes_systemd_specifiers_and_variables(scheduling):
+    repo, _, _, units = scheduling
+    renamed = repo.with_name('app % $ "quoted"')
+    repo.rename(renamed)
+    result = subprocess.run(
+        ["bash", str(renamed / "backup_run.sh")], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    service = (units / "seulseul-db-backup.service").read_text()
+    assert 'app %% $$ \\"quoted\\"/backup.sh' in service

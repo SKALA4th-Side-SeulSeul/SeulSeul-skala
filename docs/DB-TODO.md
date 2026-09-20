@@ -175,7 +175,9 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 
 - [x] 수동 운영 백업 `./backup.sh`: custom-format pg_dump, private 파일 권한, 전체 해독 검사·SHA-256, 실패 시 부분 파일 정리 및 이전 백업 보존 (실제 서버 실행·복구 시험은 별도)
 
-- [ ] 백업: 매일 `pg_dump`를 `~/backups`에 만들고 VM 밖(예: Oracle Object Storage)에도 보관, 최근 7일 유지
+- [x] 자동 백업 등록·해제 스크립트 `backup_run.sh`·`backup_stop.sh`: 한국 시간 매일 03시, systemd 사용자 타이머·lingering, 중단 기간 보충 실행. 상세 사용법은 README의 운영 DB 백업 참고
+- [ ] 운영 서버에서 자동 백업 등록 후 실제 성공 로그·파일 확인
+- [ ] VM 밖(예: Oracle Object Storage) 보관 및 보존 기간 정책 확정·적용 (현재 자동 삭제 없음)
 - [ ] 백업 복구 시험 1회
 - [ ] 로그 확인 방법 정리 (`seulseul` 계정에서 `docker compose -f compose.prod.yaml logs --tail 200 bot`)
 - [ ] 출시 전 확인: 실제 워크스페이스에서 두 개발자만 알림을 신청한 상태로 전체 흐름 점검

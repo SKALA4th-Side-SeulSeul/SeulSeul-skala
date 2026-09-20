@@ -52,10 +52,22 @@ DBeaver에서 운영 DB를 보려면 [SSH 터널 접속 절차](docs/DB-ACCESS.m
 | `./view.sh schema` | DB 테이블 목록 |
 | `./view.sh config` | 환경변수 값을 출력하지 않고 Compose 구성 검증 |
 | `./backup.sh` | 운영 DB custom-format 백업·아카이브 해독 검사·SHA-256 생성. 기존 백업 보존 |
+| `./backup_run.sh` | 매일 한국 시간 03:00 자동 백업 등록·재등록 (systemd 사용자 타이머) |
+| `./backup_stop.sh` | 자동 백업 예약 해제. 실행 중인 백업·기존 백업·DB 유지 |
 
 각 스크립트의 `--help`로 사용법을 확인할 수 있습니다. 스크립트 위치를 기준으로 실행하므로 다른 작업 디렉터리에서 절대 경로로 실행해도 같은 프로젝트를 사용합니다.
 
 ### 운영 DB 백업
+
+자동 실행은 Ubuntu 운영 서버의 `seulseul` 계정으로 직접 로그인해 `./backup_run.sh`를 실행합니다(`sudo`로 실행하지 않습니다). 같은 명령을 반복해도 타이머는 하나만 유지됩니다. 서버에서 Rootless Docker와 PostgreSQL이 실행 중이어야 합니다. 사용자 기본 소켓 `/run/user/<UID>/docker.sock`을 사용하며 로컬 개발 Docker에는 예약하지 않습니다.
+
+- 로그아웃·재부팅 후에도 실행하려면 사용자 lingering이 필요합니다. 꺼져 있으면 등록을 중단하고 `sudo loginctl enable-linger seulseul`을 관리자 계정에서 실행하도록 안내합니다.
+- 매일 **03:00 Asia/Seoul**에 실행합니다. 서버가 꺼져 놓친 예약은 다시 켜졌을 때 한 번 보충합니다. 실행 중에는 같은 타이머 백업이 중복 실행되지 않습니다. 수동 `./backup.sh`와는 별개이므로 함께 실행하지 마세요.
+- 해제: `./backup_stop.sh`. 타이머만 중지·비활성화하며 진행 중인 백업은 끝까지 실행합니다. 다시 등록하면 예약을 재개합니다. 미실행 기간의 보충 백업이 즉시 실행될 수 있습니다.
+- 예약 확인: `systemctl --user list-timers --all seulseul-db-backup.timer`
+- 결과·오류 확인: `journalctl --user -u seulseul-db-backup.service -n 100 --no-pager`
+- 실패 시 로그에 기록하며 별도 알림·자동 재시도는 없습니다. 다음 예약에 다시 시도합니다. 기존 백업 자동 삭제·외부 업로드도 하지 않으므로 디스크 용량을 확인하고 외부 보관은 별도로 설정하세요.
+- 관리 파일은 `~/.config/systemd/user/seulseul-db-backup.service`와 `.timer`입니다(`XDG_CONFIG_HOME` 설정 시 해당 경로). 저장소를 옮겼다면 새 위치에서 다시 등록하세요. 스크립트가 만든 파일만 갱신하며 같은 이름의 수동 작성 파일은 덮어쓰지 않습니다.
 
 서버에서 PostgreSQL이 실행 중일 때 `./backup.sh`를 실행합니다. 봇을 끄거나 마이그레이션을 실행하지 않으며, DB 컨테이너와 같은 버전의 `pg_dump --format=custom`을 사용합니다. 기본 위치는 저장소 상위의 `backups`로, `~/app`에서는 `~/backups/seulseul-UTC시각-고유문자열/database.dump`에 저장됩니다. 출력된 경로를 확인하세요.
 
