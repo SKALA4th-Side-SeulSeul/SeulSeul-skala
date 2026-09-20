@@ -19,7 +19,10 @@ from seulseul.checklists.model import (
     ChecklistModel,
     DailyChecklistMessageModel,
 )
-from seulseul.checklists.repository import SqlAlchemyChecklistRepository
+from seulseul.checklists.repository import (
+    SqlAlchemyChecklistRepository,
+    set_notice_checklists_deleted,
+)
 from seulseul.checklists.service import DailyChecklistService
 from seulseul.database import Base
 from seulseul.notices.model import NoticeModel
@@ -42,6 +45,8 @@ def test_checklist_model_links_student_and_notice_with_cascade_delete() -> None:
 
     assert foreign_keys == {"students.id": "CASCADE", "notices.id": "CASCADE"}
     assert "uq_checklists_student_notice" in unique_constraints
+    assert "uq_checklists_student_link" in unique_constraints
+    assert not table.c.canonical_url.nullable
     assert {"completed_at", "deleted_at"} <= set(table.columns.keys())
     assert StudentModel.checklists.property.back_populates == "student"
     assert NoticeModel.checklists.property.back_populates == "notice"
@@ -187,6 +192,139 @@ def add_notice(factory, **overrides: Any):
         session.add(model)
         session.flush()
         return model.id
+
+
+def test_cross_class_links_and_all_channel_keep_one_item_and_completion(daily_system):
+    factory, repository, messenger, clock, _ = daily_system
+    targets = {"CALL": None, "CCLASS1": 1, "CCLASS3": 3}
+    service = DailyChecklistService(
+        repository, messenger, WORKSPACE, targets, clock=lambda: clock[0]
+    )
+    for number in range(1, 5):
+        add_student(factory, user=f"USTUDENT{number}", class_number=number)
+    links = ["https://forms.example.test/shared", "https://docs.example.test/shared"]
+    third = [
+        add_notice(
+            factory, channel_id="CCLASS3", canonical_url=url, original_url=url, title="3반 안내"
+        )
+        for url in links
+    ]
+    service.run_due()
+
+    def board(user):
+        recipient = repository.recipient(WORKSPACE, user)
+        claim = repository.prepare_delivery(
+            recipient,
+            service._channels(recipient),
+            clock[0],
+            class_channels=[
+                channel for channel, target in targets.items() if target == recipient.class_number
+            ],
+        )
+        assert claim is not None
+        repository.finish_delivery(claim, "test", f"D{user}", "100.1")
+        return claim.board
+
+    assert board("USTUDENT3").pending_count == 2
+    assert board("USTUDENT1").pending_count == 0
+    first = [
+        add_notice(
+            factory, channel_id="CCLASS1", canonical_url=url, original_url=url, title="1반 안내"
+        )
+        for url in links
+    ]
+    assert board("USTUDENT1").pending_count == 2
+    assert board("USTUDENT2").pending_count == 0
+    before = board("USTUDENT1")
+    item_id = before.items[0].id
+    with factory() as session, session.begin():
+        session.get(ChecklistModel, item_id).completed_at = NOW
+    # 전체 공지가 더 늦게 올라와도 해당 반 원문을 우선한다.
+    for url in links:
+        add_notice(factory, canonical_url=url, original_url=url, title="전체 안내", posted_at=NOW)
+    one = board("USTUDENT1")
+    assert one.pending_count == 1 and one.completed_count == 1
+    assert all(item.title == "1반 안내" for item in one.items)
+    assert board("USTUDENT2").pending_count == 2
+    assert board("USTUDENT4").pending_count == 2
+    assert all(item.title == "3반 안내" for item in board("USTUDENT3").items)
+    # 1반 원본이 없어지면 전체 공지로 전환, 완료 ID·기록은 유지한다.
+    with factory() as session, session.begin():
+        for notice_id in first:
+            session.get(NoticeModel, notice_id).deleted_at = NOW
+        set_notice_checklists_deleted(session, first, NOW)
+    one = board("USTUDENT1")
+    assert one.pending_count == 1 and one.completed_count == 1
+    assert all(item.title == "전체 안내" for item in one.items)
+    with factory() as session:
+        assert session.get(ChecklistModel, item_id).completed_at is not None
+        assert len(session.scalars(select(ChecklistModel)).all()) == 8
+    # 남은 전체 원본도 삭제하면 1반에서 숨기고 3반은 그대로 둔다.
+    with factory() as session, session.begin():
+        for notice in session.scalars(select(NoticeModel).where(NoticeModel.channel_id == "CALL")):
+            notice.deleted_at = NOW
+    assert board("USTUDENT1").pending_count == 0
+    assert board("USTUDENT1").completed_count == 0
+    assert board("USTUDENT3").pending_count == 2
+    assert len(third) == 2
+
+
+@pytest.mark.parametrize("specific_first", [True, False])
+def test_specific_source_wins_in_both_arrival_orders_with_own_deadline(
+    daily_system, specific_first
+):
+    factory, _, messenger, _, service = daily_system
+    add_student(factory)
+    shared = "https://forms.example.test/common"
+    sources = [
+        ("CCLASS3", "반 원문", NOW + timedelta(days=1)),
+        ("CALL", "전체 원문", NOW + timedelta(days=3)),
+    ]
+    if not specific_first:
+        sources.reverse()
+    stable_id = None
+    for channel, title, deadline in sources:
+        add_notice(
+            factory, channel_id=channel, title=title, deadline_at=deadline, canonical_url=shared
+        )
+        service.run_due()
+        with factory() as session:
+            item = session.scalar(select(ChecklistModel))
+            if stable_id is None:
+                stable_id = item.id
+            assert item.id == stable_id
+    current = messenger.updated[-1][2] if messenger.updated else messenger.sent[-1][1]
+    assert current.pending_count == 1
+    assert current.items[0].title == "반 원문"
+    assert current.items[0].deadline_at == NOW + timedelta(days=1)
+
+
+def test_newer_same_priority_source_switch_preserves_completion_and_undo(daily_system):
+    factory, _, messenger, _, service = daily_system
+    add_student(factory)
+    original_id = add_notice(factory, canonical_url="https://forms.example.test/shared")
+    service.run_due()
+    original_board = messenger.sent[-1][1]
+    item_id = original_board.items[0].id
+    click(service, get_daily(factory)[0], "complete", item_id)
+    newer_id = add_notice(
+        factory, canonical_url="https://forms.example.test/shared", posted_at=NOW, title="최신 원본"
+    )
+    service.run_due()
+    with factory() as session:
+        item = session.get(ChecklistModel, item_id)
+        assert item.notice_id == newer_id and item.completed_at is not None
+    click(service, get_daily(factory)[0], "completed")
+    assert messenger.updated[-1][2].items[0].title == "최신 원본"
+    click(service, get_daily(factory)[0], "undo", item_id)
+    with factory() as session:
+        assert session.get(ChecklistModel, item_id).completed_at is None
+    with factory() as session, session.begin():
+        session.get(NoticeModel, newer_id).deleted_at = NOW
+    service.run_due()
+    with factory() as session:
+        item = session.get(ChecklistModel, item_id)
+        assert item.notice_id == original_id and item.completed_at is None
 
 
 def get_daily(factory):

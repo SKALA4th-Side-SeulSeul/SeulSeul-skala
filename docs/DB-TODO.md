@@ -43,7 +43,7 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 | 메모리 | 이 계정의 모든 프로세스·컨테이너 합계 최대 6GB |
 
 - 접속은 SSH로 직접 로그인합니다. `sudo -iu seulseul`처럼 계정을 전환하면 Rootless Docker가 동작하지 않을 수 있습니다.
-- 포트 포워딩이 막혀 있으므로 PostgreSQL은 내 PC에서 터널로 붙지 않고 서버에서 `docker compose exec`로 접속합니다.
+- 배포 계정의 포트 포워딩 금지는 유지합니다. DBeaver 접속은 별도 키 인증 전용 계정과 루프백 DB 포트만 사용하는 `docs/DB-ACCESS.md` 절차를 따릅니다.
 - 비밀번호는 비밀번호 관리자에서 무작위로 생성해 보관하고, 채팅·문서·저장소에 적지 않습니다.
 - 설정 파일: `/etc/ssh/sshd_config.d/90-seulseul-password.conf` (원본 백업 `/root/90-seulseul-password.conf.bak`)
 
@@ -51,7 +51,7 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 
 - **`sudo netfilter-persistent save`를 실행하지 않습니다.** 현재 적용된 규칙을 그대로 저장해 fail2ban 차단 목록이 규칙 파일에 섞입니다. 방화벽을 바꿀 때는 `/etc/iptables/rules.v4`를 직접 수정하고 `sudo -n sh -c 'iptables-restore --test < /etc/iptables/rules.v4'`로 시험한 뒤 적용합니다.
 - **규칙 파일에는 fail2ban 규칙(`f2b-…`)을 넣지 않습니다.** fail2ban이 시작할 때 스스로 추가합니다.
-- **컨테이너 포트를 외부에 공개하지 않습니다(`ports:` 사용 금지).** 일반 Docker의 공개 포트는 방화벽 규칙을 우회하며, Rootless Docker의 공개 포트와 방화벽의 관계는 확인하지 않았습니다.
+- **컨테이너 포트를 외부에 공개하지 않습니다.** 사용자 승인으로 PostgreSQL의 `127.0.0.1:5432:5432` 바인딩만 예외 허용합니다. `0.0.0.0`, `[::]`, IP 생략 바인딩은 금지하며 Oracle·호스트 방화벽의 5432 허용 규칙도 추가하지 않습니다. SSH 터널은 별도 계정에 목적지 한정으로 허용합니다.
 - **일반 Docker 서비스를 다시 켜지 않습니다.** 필요하면 이유를 `docs/DECISIONS.md`에 기록한 뒤 켭니다.
 - **`/etc/default/netfilter-persistent`는 Oracle 이미지 설정(`IPTABLES_RESTORE_NOFLUSH=yes`)을 유지합니다.**
 - `ubuntu` 계정의 관리 명령은 `sudo -n`으로 실행합니다. `sudo` 없이 `systemctl restart` 등을 실행하면 비밀번호를 물은 뒤 실패합니다.
@@ -85,6 +85,8 @@ PostgreSQL과 Docker Compose로 로컬에서 개발하고 Oracle Cloud 서버에
 - [x] DB 드라이버 선택: Psycopg 3.3 binary + SQLAlchemy 2.0 동기 엔진 (D-020)
 
 ## 1. 로컬
+
+- D-027 다중 원본 마이그레이션 `d94132ac684e`는 로컬 격리 PostgreSQL 스키마에서 완료 기록 backfill·upgrade/downgrade·다중 원본 저장·위험 downgrade 거절을 검증했습니다. 테스트 트랜잭션은 롤백했으며 실제 개발·운영 스키마에는 아직 적용하지 않았습니다. 운영은 먼저 백업하고 봇을 멈춘 뒤 새 이미지의 마이그레이션을 적용해야 합니다.
 
 ### 1-1. PostgreSQL 기반
 

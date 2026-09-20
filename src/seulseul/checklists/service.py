@@ -90,7 +90,16 @@ class DailyChecklistService:
 
     def _synchronize_locked(self, recipient: ChecklistRecipient) -> bool:
         now = self._clock().astimezone(timezone.utc)
-        claim = self._repository.prepare_delivery(recipient, self._channels(recipient), now)
+        claim = self._repository.prepare_delivery(
+            recipient,
+            self._channels(recipient),
+            now,
+            class_channels=tuple(
+                channel
+                for channel, target in self._targets.items()
+                if target == recipient.class_number
+            ),
+        )
         if claim is None:
             return False
         fingerprint = board_hash(claim.board)

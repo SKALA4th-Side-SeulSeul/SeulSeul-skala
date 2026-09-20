@@ -215,7 +215,12 @@ def test_link_change_adds_removes_and_restores_without_stealing_duplicates(notic
     )[0]
     record(service, changed_message("수정 https://docs.example.test/added " + other.original_url))
     assert notice_repository.get(WORKSPACE_ID, original.canonical_url).deleted_at is not None
-    assert notice_repository.get(WORKSPACE_ID, other.canonical_url).message_ts == other.message_ts
+    assert (
+        notice_repository.get(
+            WORKSPACE_ID, other.canonical_url, other.channel_id, other.message_ts
+        ).message_ts
+        == other.message_ts
+    )
     assert {n.canonical_url for n in service.recent_notices(10)} == {
         other.canonical_url,
         "https://docs.example.test/added",
@@ -522,7 +527,7 @@ def test_each_link_becomes_a_separate_notice() -> None:
     ]
 
 
-def test_canonical_duplicate_link_is_ignored() -> None:
+def test_canonical_duplicate_link_in_another_source_is_stored() -> None:
     service = NoticeService({ALLOWED_CHANNEL})
 
     first = record(service)
@@ -535,8 +540,53 @@ def test_canonical_duplicate_link_is_ignored() -> None:
     )
 
     assert len(first) == 1
-    assert duplicate == []
-    assert len(service.recent_notices(5)) == 1
+    assert len(duplicate) == 1
+    assert duplicate[0].canonical_url == first[0].canonical_url
+    assert len(service.recent_notices(5)) == 2
+
+
+def test_cross_channel_sources_are_independent_and_retry_requires_source(notice_repository):
+    service = NoticeService(
+        {ALLOWED_CHANNEL, "CCLASS1"}, analyzer=FakeAnalyzer(), repository=notice_repository
+    )
+    first = record(service)[0]
+    second_event = channel_message(channel="CCLASS1", ts="1789344001.000100")
+    second = record(service, second_event)[0]
+    assert first.canonical_url == second.canonical_url
+    assert len(service.recent_notices(10)) == 2
+    assert record(service, second_event) == []
+    with pytest.raises(NoticeRetryError, match="원본이 여러"):
+        service.retry_failed_notice(WORKSPACE_ID, first.original_url)
+    record(service, deleted_message())
+    assert (
+        notice_repository.get(
+            WORKSPACE_ID, second.canonical_url, second.channel_id, second.message_ts
+        ).deleted_at
+        is None
+    )
+
+
+def test_retry_selects_only_one_of_two_failed_sources(notice_repository):
+    failed = NoticeService(
+        {ALLOWED_CHANNEL, "CCLASS1"},
+        analyzer=FakeAnalyzer(AiClientError("failed")),
+        repository=notice_repository,
+    )
+    first = record(failed)[0]
+    second = record(failed, channel_message(channel="CCLASS1", ts="1789344001.000100"))[0]
+    service = NoticeService(
+        {ALLOWED_CHANNEL, "CCLASS1"}, analyzer=FakeAnalyzer(), repository=notice_repository
+    )
+    result = service.retry_failed_notice(
+        WORKSPACE_ID, second.original_url, second.channel_id, second.message_ts
+    )
+    assert result.processing_status == "processed"
+    assert (
+        notice_repository.get(
+            WORKSPACE_ID, first.canonical_url, first.channel_id, first.message_ts
+        ).processing_status
+        == "processing_failed"
+    )
 
 
 def test_similar_surveys_with_distinct_links_are_both_collected(notice_repository):
@@ -571,7 +621,7 @@ def test_repository_keeps_duplicate_detection_across_service_instances() -> None
     restarted_service = NoticeService({ALLOWED_CHANNEL}, repository=repository)
 
     assert len(record(first_service)) == 1
-    assert record(restarted_service, channel_message(ts="1789344001.000100")) == []
+    assert record(restarted_service) == []
     assert len(repository.recent(10)) == 1
 
 
@@ -664,7 +714,7 @@ def test_notice_model_enforces_link_identity_and_tracks_ai_failures() -> None:
         "next_retry_at",
         "deleted_at",
     } <= set(table.columns.keys())
-    assert "uq_notices_workspace_canonical_url" in unique_constraints
+    assert "uq_notices_workspace_canonical_url" not in unique_constraints
     assert "uq_notices_source_link" in unique_constraints
     assert "ck_notices_processing_status" in check_constraints
 
@@ -1112,6 +1162,8 @@ def test_retry_cli_wires_dependencies_and_closes_resources(
         service.retry_failed_notice.assert_called_once_with(
             WORKSPACE_ID,
             failed_notice().original_url,
+            None,
+            None,
         )
     else:
         client_constructor.assert_not_called()

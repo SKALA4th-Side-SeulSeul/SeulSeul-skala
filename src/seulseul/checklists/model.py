@@ -29,11 +29,12 @@ if TYPE_CHECKING:
 
 
 class ChecklistModel(Base):
-    """학생 한 명에게 배정된 공지의 완료·삭제 상태를 저장한다."""
+    """학생별 링크의 완료 상태. notice_id는 현재 표시할 원본을 가리킨다."""
 
     __tablename__ = "checklists"
     __table_args__ = (
         UniqueConstraint("student_id", "notice_id", name="uq_checklists_student_notice"),
+        UniqueConstraint("student_id", "canonical_url", name="uq_checklists_student_link"),
         Index("ix_checklists_student_active", "student_id", "deleted_at"),
         Index("ix_checklists_notice_id", "notice_id"),
     )
@@ -48,6 +49,7 @@ class ChecklistModel(Base):
         nullable=False,
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    canonical_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

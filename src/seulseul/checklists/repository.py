@@ -105,6 +105,8 @@ class SqlAlchemyChecklistRepository:
         recipient: ChecklistRecipient,
         channels: Collection[str],
         now: datetime,
+        *,
+        class_channels: Collection[str] = (),
     ) -> DeliveryClaim | None:
         """짧은 트랜잭션에서 배정·발송권 획득. Slack 호출 전에 커밋한다."""
         with self._session_factory() as session, session.begin():
@@ -121,10 +123,9 @@ class SqlAlchemyChecklistRepository:
             eligible = self._eligible(channels, now)
             notices = (
                 session.execute(
-                    select(NoticeModel.id)
+                    select(NoticeModel)
                     .where(
                         NoticeModel.workspace_id == recipient.workspace_id,
-                        NoticeModel.processing_status == "processed",
                         *eligible,
                     )
                     .with_for_update(read=True)
@@ -132,20 +133,44 @@ class SqlAlchemyChecklistRepository:
                 .scalars()
                 .all()
             )
-            assigned = set(
-                session.execute(
-                    select(ChecklistModel.notice_id).where(
+            assigned = {
+                item.canonical_url: item
+                for item in session.execute(
+                    select(ChecklistModel).where(
                         ChecklistModel.student_id == recipient.id,
                     )
                 ).scalars()
-            )
-            session.add_all(
-                [
-                    ChecklistModel(student_id=recipient.id, notice_id=notice_id)
-                    for notice_id in notices
-                    if notice_id not in assigned
-                ]
-            )
+            }
+            # 같은 학생에게 유효한 원본 중 반 공지 우선, 그다음 최신 게시 원본.
+            selected = {}
+            for notice in sorted(
+                notices,
+                key=lambda n: (
+                    n.channel_id in class_channels,
+                    _aware(n.posted_at),
+                    n.channel_id,
+                    n.message_ts,
+                    str(n.id),
+                ),
+                reverse=True,
+            ):
+                if notice.canonical_url not in assigned and notice.processing_status != "processed":
+                    continue
+                selected.setdefault(notice.canonical_url, notice)
+            for canonical_url, notice in selected.items():
+                item = assigned.get(canonical_url)
+                if item is None:
+                    session.add(
+                        ChecklistModel(
+                            student_id=recipient.id,
+                            notice_id=notice.id,
+                            canonical_url=canonical_url,
+                        )
+                    )
+                else:
+                    # 체크리스트 ID와 완료 기록은 그대로 두고 표시 원본만 전환한다.
+                    item.notice_id = notice.id
+                    item.deleted_at = None
             session.flush()
 
             daily = self._message_for_student(session, recipient.id)
