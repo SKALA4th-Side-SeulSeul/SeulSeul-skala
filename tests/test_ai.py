@@ -173,6 +173,11 @@ def test_analyzer_returns_validated_json_result() -> None:
     assert "[공지 원문 시작]" in client.calls[0][1]
     assert "[공지 원문 끝]" in client.calls[0][1]
     assert "메타데이터 문구를 사용하지 않는다" in client.calls[0][0]
+    assert (
+        "신청 폼·제출 폼·등록 링크가 있으면 신청·제출·등록 마감을 deadline_at으로 선택한다."
+        in client.calls[0][0]
+    )
+    assert "신청 마감과 행사 일시가 모두 있으면 신청 마감을 우선한다." in client.calls[0][0]
 
 
 def test_analyzer_retries_invalid_json_with_decided_delays() -> None:
