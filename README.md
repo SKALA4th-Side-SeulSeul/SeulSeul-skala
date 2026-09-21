@@ -95,10 +95,12 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 
 실행 전 다음 설정을 적용합니다.
 
-1. `.env`의 `SLACK_NOTICE_TARGETS`에 `SLACK_NOTICE_CHANNELS`의 각 채널 대상을 지정합니다. `all`은 등록된 광주 학생 전체, `1`~`4`는 해당 반입니다. 아래는 가상 ID 예시이며 실제 값으로 바꿉니다. 채널의 순서로 대상을 추정하지 않습니다.
+1. 봇이 초대된 자동 수집 채널은 `.env`의 `SLACK_NOTICE_CHANNELS`에, 봇을 초대할 수 없어 운영자 CLI로만 처리할 채널은 `SLACK_MANUAL_NOTICE_CHANNELS`에 지정합니다. 두 목록의 채널 대상을 `SLACK_NOTICE_TARGETS`에 모두 적습니다. `all`은 등록된 광주 학생 전체, `1`~`4`는 해당 반입니다. 아래는 가상 ID 예시이며 실제 값으로 바꿉니다.
 
    ```dotenv
-   SLACK_NOTICE_TARGETS=C0000000001=all,G0000000002=all,C0000000003=3
+   SLACK_NOTICE_CHANNELS=C0000000001,G0000000002,C0000000003
+   SLACK_MANUAL_NOTICE_CHANNELS=C0000000099
+   SLACK_NOTICE_TARGETS=C0000000001=all,G0000000002=all,C0000000003=3,C0000000099=all
    ```
 
 2. `slack-manifest.yaml`의 `chat:write`, `im:write`, `im:history` 권한과 명령 안내를 Slack 앱에 반영하고 재설치합니다. 토큰이 바뀌었다면 `.env`도 갱신합니다.
@@ -192,6 +194,47 @@ docker compose -f compose.prod.yaml exec -T bot python -m seulseul.notices.retry
 - 학생용 Slack 재처리 명령은 제공하지 않습니다.
 
 `pending`은 `notice_sources.applied=false` 원본의 워크스페이스·채널·메시지 ts를 읽기 전용으로 표시합니다. 정상 분석 중인 원본도 포함되므로 잠시 후 재확인합니다. DB에 해당 이벤트 본문이 없어서 자동 재처리하지 않으며, 계속 남은 항목은 Slack 원문을 실제 수정해 새 이벤트를 발생시키세요. 삭제된 원본은 운영자가 별도로 상태를 확인해야 합니다. 이 명령은 AI 실패 행의 `list`·`retry`와 다릅니다.
+
+## 운영자 수동 공지 처리
+
+봇을 초대할 수 없는 `4기_교육생_전체공지` 채널의 공지나 자동 분석 실패 공지는 운영자 CLI로 처리합니다. 운영자는 Slack 원문 permalink와 원문 파일을 전달하며, CLI는 기존 공지 서비스·중복 판정·학생별 DM 갱신을 재사용합니다. 학생이 Slack에서 실행하는 명령은 추가하지 않습니다.
+
+```bash
+python -m seulseul.notices.manual add \
+  --workspace-id '<워크스페이스 ID>' \
+  --source-url 'https://workspace.slack.com/archives/C.../p...' \
+  --text-file notice.txt
+
+python -m seulseul.notices.manual edit \
+  --workspace-id '<워크스페이스 ID>' \
+  --source-url 'https://workspace.slack.com/archives/C.../p...' \
+  --text-file notice-edited.txt
+
+python -m seulseul.notices.manual edit \
+  --workspace-id '<워크스페이스 ID>' \
+  --source-url 'https://workspace.slack.com/archives/C.../p...' \
+  --text-file notice.txt \
+  --title '설문 참여' \
+  --summary '설문을 제출합니다.' \
+  --deadline '2026-09-30 23:59' \
+  --deadline-source-text '9월 30일 23:59'
+
+python -m seulseul.notices.manual delete \
+  --workspace-id '<워크스페이스 ID>' \
+  --source-url 'https://workspace.slack.com/archives/C.../p...'
+```
+
+`--text-file -`를 사용하면 원문을 표준 입력으로 받을 수 있습니다. 수동 마감일에 시간대가 없으면 `Asia/Seoul`로 해석합니다. 제목·요약·마감일을 모두 입력하면 AI를 호출하지 않으며, 기존 체크리스트 완료 상태는 유지됩니다.
+
+운영 Docker에서는 원문을 표준 입력으로 전달해 일회성 컨테이너로 실행할 수 있습니다.
+
+```bash
+cat notice.txt | docker compose -f compose.prod.yaml run --rm --no-deps -T bot \
+  python -m seulseul.notices.manual edit \
+  --workspace-id '<워크스페이스 ID>' \
+  --source-url 'https://workspace.slack.com/archives/C.../p...' \
+  --text-file -
+```
 
 ### 분석 실패로 처리하는 입력
 

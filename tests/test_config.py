@@ -27,6 +27,18 @@ def test_load_slack_settings_parses_tokens_and_channels() -> None:
     assert settings.bot_token == "xoxb-test-bot-token"
     assert settings.app_token == "xapp-test-app-token"
     assert settings.notice_channels == ("C0000000001", "G0000000002", "C0000000003")
+    assert settings.manual_notice_channels == ()
+
+
+def test_load_slack_settings_parses_manual_only_channels() -> None:
+    settings = load_slack_settings(
+        {
+            **VALID_ENVIRON,
+            "SLACK_MANUAL_NOTICE_CHANNELS": " C0000000099 ",
+        }
+    )
+
+    assert settings.manual_notice_channels == ("C0000000099",)
 
 
 def test_load_slack_settings_reports_every_missing_token() -> None:
@@ -69,6 +81,13 @@ def test_load_slack_settings_rejects_channel_names() -> None:
     environ = {**VALID_ENVIRON, "SLACK_NOTICE_CHANNELS": "#전체공지,C0000000001"}
 
     with pytest.raises(ConfigError, match="Slack 채널 ID.*#전체공지"):
+        load_slack_settings(environ)
+
+
+def test_load_slack_settings_rejects_manual_channel_overlap() -> None:
+    environ = {**VALID_ENVIRON, "SLACK_MANUAL_NOTICE_CHANNELS": "C0000000001"}
+
+    with pytest.raises(ConfigError, match="SLACK_MANUAL_NOTICE_CHANNELS"):
         load_slack_settings(environ)
 
 
@@ -162,6 +181,14 @@ def test_notice_targets_are_explicit_and_match_every_allowed_channel() -> None:
             "SLACK_NOTICE_TARGETS": "CONE=all, GTWO=3",
         },
     ) == {"CONE": None, "GTWO": 3}
+
+
+def test_notice_targets_include_manual_only_channels() -> None:
+    assert load_notice_targets(
+        ("CONE",),
+        {"SLACK_NOTICE_TARGETS": "CONE=all, CMANUAL=all"},
+        manual_notice_channels=("CMANUAL",),
+    ) == {"CONE": None, "CMANUAL": None}
 
 
 @pytest.mark.parametrize(

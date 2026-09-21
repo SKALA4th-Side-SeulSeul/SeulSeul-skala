@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with ExitStack() as resources:
             slack_settings = load_slack_settings()
-            channels = slack_settings.notice_channels
+            channels = (*slack_settings.notice_channels, *slack_settings.manual_notice_channels)
             engine = create_database_engine(load_database_settings())
             resources.callback(engine.dispose)
             repository = SqlAlchemyNoticeRepository(create_session_factory(engine))

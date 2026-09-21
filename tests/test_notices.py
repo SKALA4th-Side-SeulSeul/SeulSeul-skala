@@ -127,6 +127,67 @@ def test_parse_mutation_uses_original_identity_and_allows_missing_channel_type(k
     assert parsed.kind == kind and parsed.revision == Decimal(payload["event_ts"])
 
 
+def test_manual_analysis_override_processes_notice_without_calling_ai() -> None:
+    analyzer = MagicMock()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer)
+    analysis = NoticeAnalysis(
+        title="수동 제목",
+        summary="수동 요약",
+        deadline_at=datetime(2026, 9, 30, 23, 59, tzinfo=SEOUL),
+        deadline_source_text="9월 30일 23:59",
+    )
+
+    result = service.record_channel_message(
+        channel_message(),
+        workspace_id=WORKSPACE_ID,
+        source_permalink=PERMALINK,
+        manual_analysis=analysis,
+    )
+
+    assert result[0].analysis == analysis
+    assert result[0].processing_status == "processed"
+    analyzer.analyze.assert_not_called()
+
+
+def test_manual_analysis_override_requires_one_link() -> None:
+    analysis = NoticeAnalysis(
+        title="수동 제목",
+        summary="수동 요약",
+        deadline_at=datetime(2026, 9, 30, 23, 59, tzinfo=SEOUL),
+        deadline_source_text="9월 30일 23:59",
+    )
+    service = NoticeService({ALLOWED_CHANNEL})
+
+    with pytest.raises(ValueError, match="수동 분석 결과는 링크 하나"):
+        service.record_channel_message(
+            channel_message(text="https://forms.example.test/a https://docs.example.test/b"),
+            workspace_id=WORKSPACE_ID,
+            source_permalink=PERMALINK,
+            manual_analysis=analysis,
+        )
+
+
+def test_manual_analysis_override_updates_unchanged_text() -> None:
+    service = NoticeService({ALLOWED_CHANNEL})
+    first = NoticeAnalysis(
+        title="첫 제목",
+        summary="첫 요약",
+        deadline_at=datetime(2026, 9, 30, 23, 59, tzinfo=SEOUL),
+        deadline_source_text="9월 30일 23:59",
+    )
+    second = replace(first, title="수정 제목")
+    record(service)
+
+    result = service.record_channel_message(
+        changed_message(channel_message()["text"]),
+        workspace_id=WORKSPACE_ID,
+        source_permalink=PERMALINK,
+        manual_analysis=second,
+    )
+
+    assert result[0].analysis == second
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
