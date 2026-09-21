@@ -30,6 +30,7 @@ def operations(tmp_path, monkeypatch):
         "backup.sh",
         "backup_run.sh",
         "backup_stop.sh",
+        "notice_edit.sh",
         "scripts/scheduling.sh",
         "scripts/operations.sh",
         ".env.example",
@@ -99,6 +100,46 @@ def test_run_builds_stops_migrates_then_recreates_single_bot(operations):
         assert "compose.prod.yaml" in actual
         assert actual.endswith(suffix)
     assert "never_print_this" not in result.stdout + result.stderr
+
+
+def test_notice_edit_runs_only_interactive_cli_and_forwards_arguments(operations):
+    _, run, calls = operations
+    result = run("notice_edit.sh", "--limit", "50", "--workspace-id", "TTEST")
+    assert result.returncode == 0, result.stderr
+    assert calls()[-1].endswith(
+        "run --rm --no-deps -T bot python -m seulseul.notices.manual_edit "
+        "--limit 50 --workspace-id TTEST"
+    )
+    assert not any(
+        "seulseul.main" in call or " up " in call or " stop " in call for call in calls()
+    )
+    assert "never_print_this" not in result.stdout + result.stderr
+
+
+def test_notice_edit_help_does_not_require_docker_or_env(operations):
+    repo, run, calls = operations
+    (repo / ".env").unlink()
+    result = run("notice_edit.sh", "--help")
+    assert result.returncode == 0 and "번호" in result.stdout
+    assert calls() == []
+
+
+def test_notice_edit_propagates_cli_failure_without_starting_another_bot(operations):
+    repo, run, calls = operations
+    (repo / "fail-step").write_text("seulseul.notices.manual_edit\n")
+    assert run("notice_edit.sh").returncode == 17
+    assert not any(" up " in call or "build " in call for call in calls())
+
+
+@pytest.mark.parametrize("invalid", ["nonroot", "missing_env"])
+def test_notice_edit_requires_safe_operations_setup(operations, invalid):
+    repo, run, calls = operations
+    if invalid == "nonroot":
+        (repo / "nonroot").touch()
+    else:
+        (repo / ".env").unlink()
+    assert run("notice_edit.sh").returncode != 0
+    assert not any(" run " in call for call in calls())
 
 
 @pytest.mark.parametrize("failure", ["build bot migrate", "run --rm migrate", "config --quiet"])

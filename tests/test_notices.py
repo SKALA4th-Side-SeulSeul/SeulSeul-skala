@@ -127,6 +127,62 @@ def test_parse_mutation_uses_original_identity_and_allows_missing_channel_type(k
     assert parsed.kind == kind and parsed.revision == Decimal(payload["event_ts"])
 
 
+@pytest.mark.parametrize("conflict", [None, "edited", "deleted", "processing", "extra_link"])
+def test_guarded_manual_edit_rejects_changed_source_before_reserving_event(
+    notice_repository, conflict
+):
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=FakeAnalyzer()
+    )
+    record(service)
+    original = service.recent_notices(1)[0]
+    analysis = replace(
+        original.analysis,
+        title="운영자 수정",
+        deadline_at=datetime(2026, 9, 30, 23, 59, tzinfo=SEOUL),
+    )
+    if conflict == "edited":
+        record(service, changed_message("새 원문 https://forms.example.test/task"))
+    elif conflict == "deleted":
+        record(service, deleted_message())
+    elif conflict == "processing":
+        event = parse_notice_event(changed_message("분석 중"), {ALLOWED_CHANNEL}, None)
+        assert notice_repository.begin_event(WORKSPACE_ID, event)
+    elif conflict == "extra_link":
+        record(
+            service,
+            changed_message(original.text + " https://docs.example.test/second"),
+        )
+    before = notice_repository.source_notices(WORKSPACE_ID, ALLOWED_CHANNEL, MESSAGE_TS)
+    pending_before = service.pending_sources(10)
+    result = service.record_channel_message(
+        changed_message(original.text, revision="1789344300.000001"),
+        workspace_id=WORKSPACE_ID,
+        source_permalink=PERMALINK,
+        manual_analysis=analysis,
+        expected_notice=original,
+    )
+    if conflict is None:
+        assert len(result) == 1 and result[0].analysis.title == "운영자 수정"
+        assert result[0].text == original.text
+    else:
+        assert result == []
+        assert notice_repository.source_notices(WORKSPACE_ID, ALLOWED_CHANNEL, MESSAGE_TS) == before
+        assert service.pending_sources(10) == pending_before
+
+
+def test_configured_recent_notices_filter_before_limit(notice_repository):
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, repository=notice_repository, analyzer=FakeAnalyzer()
+    )
+    record(service)
+    first = service.recent_notices(1)[0]
+    notice_repository.add(
+        replace(first, channel_id="COTHER", posted_at=first.posted_at + timedelta(days=1))
+    )
+    assert service.recent_notices(1, configured_only=True) == [first]
+
+
 def test_manual_analysis_override_processes_notice_without_calling_ai() -> None:
     analyzer = MagicMock()
     service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer)
