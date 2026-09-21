@@ -22,7 +22,10 @@ class SlackCommandResponder:
         self._respond = respond
 
     def send(self, text: str) -> None:
-        self._respond(text, response_type="ephemeral")
+        # 버튼 response_url의 안내가 원본 체크리스트를 교체하거나 삭제하지 않게 한다.
+        self._respond(
+            text, response_type="ephemeral", replace_original=False, delete_original=False
+        )
 
 
 class MessagePermalinkProvider(Protocol):
