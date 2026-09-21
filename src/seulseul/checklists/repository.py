@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable, Collection
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,16 @@ from seulseul.users.model import StudentModel
 PAGE_SIZE = 5
 LEASE_SECONDS = 180
 logger = logging.getLogger(__name__)
+
+
+def _same_message_timestamp(expected: str | None, received: str) -> bool:
+    """Slack timestamp의 소수점 자릿수 차이를 허용해 같은 메시지인지 확인한다."""
+    if expected is None or expected == received:
+        return expected == received
+    try:
+        return Decimal(expected) == Decimal(received)
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def set_notice_checklists_deleted(
@@ -371,7 +382,7 @@ class SqlAlchemyChecklistRepository:
                 daily is None
                 or daily.id != daily_id
                 or daily.dm_channel_id != channel_id
-                or daily.message_ts != message_ts
+                or not _same_message_timestamp(daily.message_ts, message_ts)
             ):
                 raise ChecklistActionError(
                     "현재 연결된 본인의 체크리스트에서만 변경할 수 있습니다."
