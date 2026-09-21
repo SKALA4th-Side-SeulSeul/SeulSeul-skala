@@ -254,6 +254,31 @@ def test_parse_notice_analysis_rejects_invalid_results(raw_output: str) -> None:
         parse_notice_analysis(raw_output, "9월 20일까지 제출", POSTED_AT)
 
 
+def test_yearless_deadline_repairs_model_year_to_slack_post_year() -> None:
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_source_text="9월 30일 오후 6시까지",
+            deadline_at="2025-09-30T18:00:00+09:00",
+        ),
+        "9월 30일 오후 6시까지 과제를 제출해 주세요.",
+        POSTED_AT,
+    )
+
+    assert result.deadline_at == datetime(2026, 9, 30, 18, tzinfo=SEOUL)
+
+
+def test_explicit_past_year_is_not_repaired() -> None:
+    with pytest.raises(AiClientError, match="과거"):
+        parse_notice_analysis(
+            analysis_json(
+                deadline_source_text="2025년 9월 30일까지",
+                deadline_at="2025-09-30T23:59:00+09:00",
+            ),
+            "2025년 9월 30일까지 과제를 제출해 주세요.",
+            POSTED_AT,
+        )
+
+
 @pytest.mark.parametrize(
     "source,deadline",
     [

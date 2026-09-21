@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from seulseul.ai.client import MAX_RETRY_AFTER_SECONDS, AiClientError, ChatClient
-from seulseul.ai.deadline import CLOCK, expected_deadline
+from seulseul.ai.deadline import CLOCK, DATE, expected_deadline
 from seulseul.ai.model import NoticeAnalysis
 
 MAX_NOTICE_INPUT_CHARS = 12_000
@@ -147,8 +147,6 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         deadline_at = deadline_at.astimezone(SEOUL_TIMEZONE)
     except (ValueError, OverflowError) as error:
         raise AiClientError("AI 마감일이 지원 범위를 벗어났습니다.") from error
-    if deadline_at < posted_at.astimezone(SEOUL_TIMEZONE):
-        raise AiClientError("AI가 추출한 마감일이 Slack 게시 시각보다 과거입니다.")
     if values["deadline_source_text"] not in notice_text:
         raise AiClientError("AI가 반환한 마감 표현이 공지 원문에 없습니다.")
     evidence = values["deadline_source_text"]
@@ -170,7 +168,20 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         raise AiClientError(
             "원문에 시각이 있습니다. 마감 근거에 날짜와 시각을 함께 인용해야 합니다."
         )
-    if deadline_at != expected_deadline(evidence, posted_at):
+    expected = expected_deadline(evidence, posted_at)
+    posted_at_seoul = posted_at.astimezone(SEOUL_TIMEZONE)
+    if (
+        deadline_at < posted_at_seoul
+        and expected >= posted_at_seoul
+        and not any(match.group("year") for match in DATE.finditer(evidence))
+        and _same_month_day_and_time(deadline_at, expected)
+    ):
+        # 원문에 연도가 없으면 게시 연도를 사용한다는 제품 규칙을 적용한다.
+        # 소형 모델이 날짜·시각은 맞추고 학습 데이터의 과거 연도만 붙이는 경우를 보정한다.
+        deadline_at = expected
+    if deadline_at < posted_at_seoul:
+        raise AiClientError("AI가 추출한 마감일이 Slack 게시 시각보다 과거입니다.")
+    if deadline_at != expected:
         raise AiClientError("AI 마감일이 원문의 날짜·시각과 일치하지 않습니다.")
 
     return NoticeAnalysis(
@@ -178,4 +189,23 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         summary=values["summary"],
         deadline_at=deadline_at,
         deadline_source_text=values["deadline_source_text"],
+    )
+
+
+def _same_month_day_and_time(first: datetime, second: datetime) -> bool:
+    """연도만 다른 두 Asia/Seoul 마감 시각이 같은지 확인한다."""
+    return (
+        first.month,
+        first.day,
+        first.hour,
+        first.minute,
+        first.second,
+        first.microsecond,
+    ) == (
+        second.month,
+        second.day,
+        second.hour,
+        second.minute,
+        second.second,
+        second.microsecond,
     )
