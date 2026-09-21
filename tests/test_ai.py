@@ -21,6 +21,7 @@ def create_client(
     handler: Callable[[httpx.Request], httpx.Response],
     timeout_seconds: float = 5.0,
     *,
+    provider: str = "nvidia",
     disable_thinking: bool = False,
 ) -> OpenAICompatibleChatClient:
     return OpenAICompatibleChatClient(
@@ -28,6 +29,7 @@ def create_client(
         api_key=SECRET_API_KEY,
         model="test-model",
         timeout_seconds=timeout_seconds,
+        provider=provider,
         disable_thinking=disable_thinking,
         transport=httpx.MockTransport(handler),
     )
@@ -81,6 +83,47 @@ def test_complete_sends_decided_nvidia_parameters() -> None:
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
+def test_ollama_complete_uses_native_api_to_disable_qwen_thinking() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": analysis_json()}},
+        )
+
+    result = create_client(
+        handler,
+        provider="ollama",
+        disable_thinking=True,
+    ).complete("시스템 지시", "사용자 입력")
+
+    assert result == analysis_json()
+    request = captured_requests[0]
+    assert request.url.path == "/api/chat"
+    body = json.loads(request.content)
+    assert body["think"] is False
+    assert body["stream"] is False
+    assert body["keep_alive"] == "5m"
+    assert body["format"] == {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "deadline_at": {"type": "string"},
+            "deadline_source_text": {"type": "string"},
+        },
+        "required": ["title", "summary", "deadline_at", "deadline_source_text"],
+    }
+    assert body["options"] == {
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "num_ctx": 2048,
+        "num_predict": 256,
+    }
+
+
 @pytest.mark.parametrize(("status", "retryable"), [(401, False), (429, True), (500, True)])
 def test_complete_classifies_retryable_statuses(status: int, retryable: bool) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -127,6 +170,9 @@ def test_analyzer_returns_validated_json_result() -> None:
     )
     assert "대상 링크: https://forms.example.test/task" in client.calls[0][1]
     assert POSTED_AT.isoformat() in client.calls[0][1]
+    assert "[공지 원문 시작]" in client.calls[0][1]
+    assert "[공지 원문 끝]" in client.calls[0][1]
+    assert "메타데이터 문구를 사용하지 않는다" in client.calls[0][0]
 
 
 def test_analyzer_retries_invalid_json_with_decided_delays() -> None:

@@ -1,5 +1,13 @@
 # 결정 기록
 
+## D-032 — Ollama Qwen3 네이티브 API와 thinking 비활성화
+
+- 날짜: 2026-09-21. Qwen3 로컬 실행 전환 요청에 따른 구현 결정.
+- 상태: 코드 구현 완료, Oracle 운영 서버·실제 Slack 확인은 미완료.
+- 내용: `AI_PROVIDER=ollama`일 때 `OLLAMA_BASE_URL`에서 `/v1` 경로를 제거해 Ollama 네이티브 `/api/chat`을 호출합니다. Qwen3 요청에는 최상위 `think=false`, `stream=false`, `keep_alive=5m`과 공지 분석용 JSON Schema를 보내고, `temperature=0.2`, `top_p=0.8`, `num_ctx=2048`, `num_predict=256`은 `options` 안에 둡니다. NVIDIA는 기존 OpenAI 호환 `/v1/chat/completions` 경로를 유지합니다.
+- 이유: Ollama의 네이티브 chat API가 Qwen3 thinking 제어를 명시적으로 제공하며, OpenAI 호환 경로의 비표준 thinking 옵션에 의존하지 않기 위함입니다. `AI_PROVIDER`와 모델·주소는 계속 환경변수로 선택합니다.
+- 결과: 환경변수만으로 thinking을 끄는 것이 아니라, Ollama 호출 경계에서 실제 `think=false`를 전송합니다. 운영 전환 시 컨테이너 네트워크에서 Ollama 주소가 접근 가능한지 별도로 확인해야 합니다.
+
 ## D-031 — 정상 성명 반 변경 자동 동기화
 
 - 날짜: 2026-09-20. 사용자 구현 요청 및 `slack-manifest.yaml`의 `user_change` 이벤트 구독 추가 승인.
