@@ -121,6 +121,7 @@ class NoticeService:
         bot_id: str | None = None,
         collection_error: str | None = None,
         collection_retryable: bool = False,
+        manual_analysis: NoticeAnalysis | None = None,
     ) -> list[Notice]:
         """최신 원본 이벤트만 적용하고 링크별 공지·체크리스트를 함께 동기화한다."""
         parsed = self.parse_event(event, bot_user_id, bot_id)
@@ -130,9 +131,11 @@ class NoticeService:
             self.needs_permalink(parsed) and not source_permalink and not collection_error
         ):
             raise ValueError("workspace_id와 source_permalink는 비어 있을 수 없습니다.")
+        links = extract_notice_urls(parsed.text)
+        if manual_analysis is not None and len(links) != 1:
+            raise ValueError("수동 분석 결과는 링크 하나가 있는 원문에만 적용할 수 있습니다.")
         if not self._repository.begin_event(workspace_id, parsed):
             return []
-        links = extract_notice_urls(parsed.text)
         if "\x00" in parsed.text or any(
             len(canonical.encode("utf-8")) > 2048 for _, canonical in links
         ):
@@ -157,12 +160,16 @@ class NoticeService:
         results = []
         for original_url, canonical_url in links:
             original = originals.get(canonical_url)
-            if original is not None and (
-                parsed.kind == "created"
-                or (
-                    original.deleted_at is None
-                    and original.text == parsed.text
-                    and original.original_url == original_url
+            if (
+                original is not None
+                and manual_analysis is None
+                and (
+                    parsed.kind == "created"
+                    or (
+                        original.deleted_at is None
+                        and original.text == parsed.text
+                        and original.original_url == original_url
+                    )
                 )
             ):
                 results.append(original)
@@ -178,6 +185,7 @@ class NoticeService:
                 posted_at=posted_at,
                 collection_error=collection_error,
                 collection_retryable=collection_retryable,
+                analysis_override=manual_analysis,
             )
             if (
                 analyzed.processing_status != "processed"
@@ -346,6 +354,7 @@ class NoticeService:
         posted_at: datetime,
         collection_error: str | None = None,
         collection_retryable: bool = False,
+        analysis_override: NoticeAnalysis | None = None,
     ) -> Notice:
         if collection_error:
             return Notice(
@@ -362,6 +371,27 @@ class NoticeService:
                 next_retry_at=self._clock() + timedelta(seconds=AUTO_RETRY_DELAYS[0])
                 if collection_retryable
                 else None,
+            )
+        if analysis_override is not None:
+            if len(analysis_override.title) > 255 or "\x00" in (
+                analysis_override.title
+                + analysis_override.summary
+                + analysis_override.deadline_source_text
+            ):
+                raise ValueError("수동 분석 결과가 저장 규격을 벗어났습니다.")
+            if analysis_override.deadline_at.tzinfo is None:
+                raise ValueError("수동 마감일에는 시간대가 필요합니다.")
+            return Notice(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                text=text,
+                original_url=original_url,
+                canonical_url=canonical_url,
+                source_permalink=source_permalink,
+                posted_at=posted_at,
+                processing_status="processed",
+                analysis=analysis_override,
             )
         if self._analyzer is None:
             return Notice(

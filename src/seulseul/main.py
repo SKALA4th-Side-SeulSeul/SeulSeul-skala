@@ -97,7 +97,10 @@ def main() -> None:
         slack_settings = load_slack_settings()
         ai_settings = load_ai_settings()
         database_settings = load_database_settings()
-        notice_targets = load_notice_targets(slack_settings.notice_channels)
+        notice_targets = load_notice_targets(
+            slack_settings.notice_channels,
+            manual_notice_channels=slack_settings.manual_notice_channels,
+        )
     except ConfigError as error:
         logger.error("설정 오류: %s", error)
         sys.exit(1)

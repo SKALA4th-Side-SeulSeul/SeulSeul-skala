@@ -42,6 +42,8 @@ class SlackSettings:
     app_token: str
     # 채널 이름은 바뀔 수 있으므로 Slack 채널 ID만 사용한다.
     notice_channels: tuple[str, ...]
+    # 봇 이벤트는 받지 않고 운영자 CLI로만 처리하는 채널입니다.
+    manual_notice_channels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -60,10 +62,14 @@ class DatabaseSettings:
 
 
 def load_notice_targets(
-    notice_channels: tuple[str, ...], environ: Mapping[str, str] | None = None
+    notice_channels: tuple[str, ...],
+    environ: Mapping[str, str] | None = None,
+    *,
+    manual_notice_channels: tuple[str, ...] = (),
 ) -> dict[str, int | None]:
     """공지 채널별 광주 전체(None) 또는 반 번호를 명시적으로 읽는다."""
     environ = _resolve_environ(environ)
+    configured_channels = (*notice_channels, *manual_notice_channels)
     raw = _read(environ, "SLACK_NOTICE_TARGETS")
     targets: dict[str, int | None] = {}
     for entry in raw.split(","):
@@ -72,7 +78,7 @@ def load_notice_targets(
         if (
             not separator
             or channel in targets
-            or channel not in notice_channels
+            or channel not in configured_channels
             or target not in {"all", "1", "2", "3", "4"}
         ):
             raise ConfigError(
@@ -80,8 +86,8 @@ def load_notice_targets(
                 "쉼표로 구분해 입력하세요. 중복·미등록 채널은 허용하지 않습니다."
             )
         targets[channel] = None if target == "all" else int(target)
-    if set(targets) != set(notice_channels):
-        raise ConfigError("SLACK_NOTICE_TARGETS에 SLACK_NOTICE_CHANNELS의 모든 채널이 필요합니다.")
+    if set(targets) != set(configured_channels):
+        raise ConfigError("SLACK_NOTICE_TARGETS에 자동·수동 공지 채널의 모든 채널이 필요합니다.")
     return targets
 
 
@@ -117,10 +123,29 @@ def load_slack_settings(environ: Mapping[str, str] | None = None) -> SlackSettin
             f"Slack 채널 ID를 입력하세요. 잘못된 값: {', '.join(invalid_channels)}"
         )
 
+    manual_notice_channels = tuple(
+        channel.strip()
+        for channel in _read(environ, "SLACK_MANUAL_NOTICE_CHANNELS").split(",")
+        if channel.strip()
+    )
+    invalid_manual_channels = [
+        channel
+        for channel in manual_notice_channels
+        if SLACK_CHANNEL_ID_PATTERN.fullmatch(channel) is None
+    ]
+    if invalid_manual_channels:
+        raise ConfigError(
+            "SLACK_MANUAL_NOTICE_CHANNELS에는 C 또는 G로 시작하는 Slack 채널 ID만 "
+            f"허용합니다. 잘못된 값: {', '.join(invalid_manual_channels)}"
+        )
+    if set(notice_channels) & set(manual_notice_channels):
+        raise ConfigError("SLACK_MANUAL_NOTICE_CHANNELS는 자동 공지 채널과 중복될 수 없습니다.")
+
     return SlackSettings(
         bot_token=_read(environ, "SLACK_BOT_TOKEN"),
         app_token=_read(environ, "SLACK_APP_TOKEN"),
         notice_channels=notice_channels,
+        manual_notice_channels=manual_notice_channels,
     )
 
 
