@@ -236,7 +236,12 @@ def test_cross_class_links_and_all_channel_keep_one_item_and_completion(daily_sy
     links = ["https://forms.example.test/shared", "https://docs.example.test/shared"]
     third = [
         add_notice(
-            factory, channel_id="CCLASS3", canonical_url=url, original_url=url, title="3반 안내"
+            factory,
+            channel_id="CCLASS3",
+            message_ts="1789559318.987269",
+            canonical_url=url,
+            original_url=url,
+            title="3반 안내",
         )
         for url in links
     ]
@@ -258,9 +263,16 @@ def test_cross_class_links_and_all_channel_keep_one_item_and_completion(daily_sy
 
     assert board("USTUDENT3").pending_count == 2
     assert board("USTUDENT1").pending_count == 0
+    source_refs = {item.source_ref for item in board("USTUDENT3").items}
+    assert len(source_refs) == 1 and next(iter(source_refs)).startswith("CCLASS3:")
     first = [
         add_notice(
-            factory, channel_id="CCLASS1", canonical_url=url, original_url=url, title="1반 안내"
+            factory,
+            channel_id="CCLASS1",
+            message_ts="1789559319.987269",
+            canonical_url=url,
+            original_url=url,
+            title="1반 안내",
         )
         for url in links
     ]

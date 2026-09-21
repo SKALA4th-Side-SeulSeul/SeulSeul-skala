@@ -231,7 +231,7 @@ class InMemoryNoticeRepository:
                 active = [
                     n for n in self._notices if _source_key(n) == key and n.deleted_at is None
                 ]
-                if state is None or state[1] or not state[2] or active != [expected_notice]:
+                if state is None or state[1] or not state[2] or expected_notice not in active:
                     return False
             if state is not None:
                 revision, deleted, applied = state
@@ -450,7 +450,7 @@ class SqlAlchemyNoticeRepository:
                         NoticeModel.deleted_at.is_(None),
                     )
                 ).all()
-                if [_to_notice(model) for model in active] != [expected_notice]:
+                if expected_notice not in [_to_notice(model) for model in active]:
                     return False
             session.execute(
                 insert(NoticeSourceModel)

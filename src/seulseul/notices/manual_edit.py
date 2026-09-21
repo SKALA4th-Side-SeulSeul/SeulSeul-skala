@@ -78,6 +78,7 @@ def _edit(service, limit, workspace_id, read) -> int:
         title = notice.analysis.title if notice.analysis else "분석 결과 없음"
         print(f"{index}. {_display(title[:80])} [{notice.processing_status}]")
         print(f"   {_display(notice.workspace_id)} / {_display(notice.channel_id)}")
+        print(f"   제출 링크: {_display(notice.original_url)}")
         print(f"   {_display(notice.source_permalink) or '원문 링크 없음'}")
     if len(notices) == limit:
         print("최근 조회 한도입니다. 더 보려면 ./notice_edit.sh --limit 100을 사용하세요.")
@@ -89,8 +90,8 @@ def _edit(service, limit, workspace_id, read) -> int:
         print(f"1~{len(notices)} 사이의 번호를 입력하세요.")
 
     links = extract_notice_urls(original.text)
-    if len(links) != 1 or links[0][1] != original.canonical_url:
-        print("처리 대상 링크가 하나인 원문만 수동 수정할 수 있습니다. 저장하지 않았습니다.")
+    if original.canonical_url not in {canonical for _, canonical in links}:
+        print("선택한 제출 링크가 현재 원문에 없습니다. 저장하지 않았습니다.")
         return 1
     if len(original.text) > MAX_MANUAL_TEXT_CHARS or "\x00" in original.text:
         print("원문이 저장 규격을 벗어났습니다. 원문을 확인해 주세요. 저장하지 않았습니다.")
@@ -167,6 +168,7 @@ def _edit(service, limit, workspace_id, read) -> int:
         workspace_id=original.workspace_id,
         source_permalink=permalink,
         manual_analysis=analysis,
+        manual_canonical_url=original.canonical_url,
         expected_notice=original,
     )
     if not changed:

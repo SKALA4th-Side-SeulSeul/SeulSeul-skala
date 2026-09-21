@@ -122,6 +122,7 @@ class NoticeService:
         collection_error: str | None = None,
         collection_retryable: bool = False,
         manual_analysis: NoticeAnalysis | None = None,
+        manual_canonical_url: str | None = None,
         expected_notice: Notice | None = None,
     ) -> list[Notice]:
         """최신 원본 이벤트만 적용하고 링크별 공지·체크리스트를 함께 동기화한다."""
@@ -133,8 +134,13 @@ class NoticeService:
         ):
             raise ValueError("workspace_id와 source_permalink는 비어 있을 수 없습니다.")
         links = extract_notice_urls(parsed.text)
-        if manual_analysis is not None and len(links) != 1:
-            raise ValueError("수동 분석 결과는 링크 하나가 있는 원문에만 적용할 수 있습니다.")
+        if manual_analysis is not None:
+            if manual_canonical_url is None and len(links) != 1:
+                raise ValueError("수동 분석 결과는 링크 하나가 있는 원문에만 적용할 수 있습니다.")
+            if manual_canonical_url is not None and manual_canonical_url not in {
+                canonical for _, canonical in links
+            }:
+                raise ValueError("수동 분석 결과의 링크가 원문에 없습니다.")
         if expected_notice is not None:
             if (
                 manual_analysis is None
@@ -181,7 +187,10 @@ class NoticeService:
             original = originals.get(canonical_url)
             if (
                 original is not None
-                and manual_analysis is None
+                and (
+                    manual_analysis is None
+                    or (manual_canonical_url is not None and canonical_url != manual_canonical_url)
+                )
                 and (
                     parsed.kind == "created"
                     or (
@@ -204,7 +213,12 @@ class NoticeService:
                 posted_at=posted_at,
                 collection_error=collection_error,
                 collection_retryable=collection_retryable,
-                analysis_override=manual_analysis,
+                analysis_override=(
+                    manual_analysis
+                    if manual_analysis is not None
+                    and (manual_canonical_url is None or manual_canonical_url == canonical_url)
+                    else None
+                ),
             )
             if (
                 analyzed.processing_status != "processed"
