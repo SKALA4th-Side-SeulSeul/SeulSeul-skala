@@ -4,9 +4,16 @@ import logging
 import re
 from collections.abc import Callable, Mapping
 from typing import Any
+from uuid import uuid4
 
 from slack_bolt import App
 
+from seulseul.checklists.diagnostics import (
+    OPERATIONS,
+    identifier_ref,
+    log_event,
+    timestamp_for_log,
+)
 from seulseul.checklists.model import ChecklistActionError, ChecklistDeliveryError
 from seulseul.checklists.service import DailyChecklistService
 from seulseul.notices.service import NoticeService
@@ -205,9 +212,21 @@ def create_checklist_action_handler(service: DailyChecklistService) -> Callable[
     ) -> None:
         ack()
         responder = SlackCommandResponder(respond)
+        trace_id = uuid4().hex
         try:
             action = body["actions"][0]
             operation = str(action["action_id"]).removeprefix("checklist_")
+            log_event(
+                logger,
+                logging.INFO,
+                "checklist_action_received",
+                trace_id=trace_id,
+                operation=operation if operation in OPERATIONS else "unknown",
+                workspace_ref=identifier_ref(str(body["team"]["id"])),
+                user_ref=identifier_ref(str(body["user"]["id"])),
+                channel_ref=identifier_ref(str(body["container"]["channel_id"])),
+                message_ts=timestamp_for_log(str(body["container"]["message_ts"])),
+            )
             updated = service.handle_action(
                 str(body["team"]["id"]),
                 str(body["user"]["id"]),
@@ -215,15 +234,24 @@ def create_checklist_action_handler(service: DailyChecklistService) -> Callable[
                 str(body["container"]["message_ts"]),
                 operation,
                 str(action["value"]),
+                trace_id=trace_id,
             )
             if not updated:
                 responder.send("변경은 저장했습니다. DM 갱신을 기다리거나 새로고침을 눌러 주세요.")
         except (KeyError, IndexError, TypeError):
+            log_event(logger, logging.WARNING, "checklist_action_invalid_body", trace_id=trace_id)
             responder.send("버튼 정보를 확인할 수 없습니다. 최신 체크리스트를 이용해 주세요.")
         except ChecklistActionError as error:
+            log_event(logger, logging.WARNING, "checklist_action_rejected", trace_id=trace_id)
             responder.send(str(error))
         except Exception as error:
-            logger.error("체크리스트 동작 오류: type=%s", type(error).__name__)
+            log_event(
+                logger,
+                logging.ERROR,
+                "checklist_action_error",
+                trace_id=trace_id,
+                error_type=type(error).__name__,
+            )
             responder.send("처리 결과를 확인하지 못했습니다. 잠시 후 새로고침해 주세요.")
 
     return handle_checklist_action
