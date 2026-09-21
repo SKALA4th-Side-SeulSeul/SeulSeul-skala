@@ -277,6 +277,30 @@ def test_yearless_deadline_repairs_model_year_to_slack_post_year() -> None:
     assert result.deadline_at == datetime(2026, 9, 30, 18, tzinfo=SEOUL)
 
 
+def test_accepts_equivalent_deadline_evidence_with_slack_formatting() -> None:
+    notice_text = (
+        ":warning: 보안 공지 — API Key 관리 안내\n\n"
+        "최근 실습 Repository에 `.env` 파일이 포함되는 사례가 확인되었습니다.\n"
+        "API Key, DB Password, Access Token 등 민감 정보가 Git에 올라가지 않도록 "
+        "*2026년 10월 5일 18:00까지* 확인해 주세요.\n\n"
+        "• 보안 체크리스트\n"
+        "https://docs.google.com/document/d/SECURITYCHECK1005/edit\n\n"
+        "• 보안 점검 완료 제출\n"
+        "https://forms.gle/SECURITYCHECK1005"
+    )
+
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at="2026-10-05T18:00:00+09:00",
+            deadline_source_text="2026년 10월 5일 오후 6시까지 확인해 주세요",
+        ),
+        notice_text,
+        POSTED_AT,
+    )
+
+    assert result.deadline_at == datetime(2026, 10, 5, 18, tzinfo=SEOUL)
+
+
 def test_explicit_past_year_is_not_repaired() -> None:
     with pytest.raises(AiClientError, match="과거"):
         parse_notice_analysis(
