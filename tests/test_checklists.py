@@ -922,7 +922,7 @@ def test_original_buttons_work_after_midnight_and_preserve_completion_next_day(d
     assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
 
 
-def test_button_accepts_equivalent_slack_message_timestamp_precision(daily_system):
+def test_button_rejects_timestamp_with_different_string_representation(daily_system):
     factory, _, messenger, _, service = daily_system
     add_student(factory)
     add_notice(factory)
@@ -930,20 +930,22 @@ def test_button_accepts_equivalent_slack_message_timestamp_precision(daily_syste
     daily = get_daily(factory)[0]
     item_id = messenger.sent[0][1].items[0].id
 
-    service.handle_action(
-        WORKSPACE,
-        "UONE",
-        daily.dm_channel_id,
-        f"{float(daily.message_ts):.6f}",
-        "complete",
-        json.dumps({"daily": str(daily.id), "item": str(item_id)}),
-    )
+    with pytest.raises(ChecklistActionError):
+        service.handle_action(
+            WORKSPACE,
+            "UONE",
+            daily.dm_channel_id,
+            f"{float(daily.message_ts):.6f}",
+            "complete",
+            json.dumps({"daily": str(daily.id), "item": str(item_id)}),
+        )
 
     with factory() as session:
-        assert session.get(ChecklistModel, item_id).completed_at is not None
+        assert session.get(ChecklistModel, item_id).completed_at is None
+    assert messenger.updated == []
 
 
-def test_legacy_daily_records_reuse_first_message_but_accept_tracked_buttons(daily_system):
+def test_legacy_daily_records_reuse_first_message_and_reject_other_buttons(daily_system):
     factory, _, messenger, _, service = daily_system
     student_id = add_student(factory)
     with factory() as session, session.begin():
@@ -972,12 +974,13 @@ def test_legacy_daily_records_reuse_first_message_but_accept_tracked_buttons(dai
     assert messenger.sent == [] and len(get_daily(factory)) == 3
     assert messenger.updated[-1][:2] == ("DUONE", "1.1")
     assert messenger.updated[-1][2].show_completed
-    assert click(service, newer, "pending")
-    assert messenger.updated[-1][:2] == (newer.dm_channel_id, newer.message_ts)
+    with pytest.raises(ChecklistActionError):
+        click(service, newer, "pending")
+    assert len(messenger.updated) == 1
     assert click(service, oldest, "pending")
 
 
-def test_button_uses_the_tracked_message_record_from_its_payload(daily_system):
+def test_button_cannot_change_completion_from_non_current_message(daily_system, caplog):
     factory, _, messenger, _, service = daily_system
     student_id = add_student(factory)
     add_notice(factory)
@@ -1002,21 +1005,37 @@ def test_button_uses_the_tracked_message_record_from_its_payload(daily_system):
     with factory() as session:
         item = session.scalar(select(ChecklistModel).where(ChecklistModel.student_id == student_id))
 
-    service.handle_action(
-        WORKSPACE,
-        "UONE",
-        current.dm_channel_id,
-        current.message_ts,
-        "complete",
-        json.dumps({"daily": str(current.id), "item": str(item.id)}),
-    )
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(ChecklistActionError):
+        service.handle_action(
+            WORKSPACE,
+            "UONE",
+            current.dm_channel_id,
+            current.message_ts,
+            "complete",
+            json.dumps({"daily": str(current.id), "item": str(item.id)}),
+        )
 
     with factory() as session:
-        assert session.get(ChecklistModel, item.id).completed_at is not None
-    assert messenger.updated[-1][:2] == (current.dm_channel_id, current.message_ts)
+        assert session.get(ChecklistModel, item.id).completed_at is None
+    assert len(messenger.updated) == 1
+    assert messenger.updated[-1][:2] == (oldest.dm_channel_id, oldest.message_ts)
+    validation = next(
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if json.loads(record.getMessage())["event"] == "checklist_message_validation"
+    )
+    assert validation["result"] == "rejected"
+    assert validation["reason"] == "delivery_not_current"
 
 
-def test_button_uses_matching_message_address_when_payload_daily_id_is_stale(daily_system):
+@pytest.mark.parametrize("reference", ["missing", "other_student", "other_message"])
+@pytest.mark.parametrize(
+    "operation", ["complete", "undo", "pending", "completed", "previous", "next", "refresh"]
+)
+def test_button_rejects_wrong_record_id_even_with_matching_message_address(
+    daily_system, reference, operation
+):
     factory, _, messenger, _, service = daily_system
     student_id = add_student(factory)
     add_notice(factory)
@@ -1030,22 +1049,43 @@ def test_button_uses_matching_message_address_when_payload_daily_id_is_stale(dai
         )
         session.add(daily)
 
+    referenced_id = uuid4()
+    if reference != "missing":
+        owner_id = (
+            add_student(factory, user="UOTHER") if reference == "other_student" else student_id
+        )
+        with factory() as session, session.begin():
+            session.add(
+                DailyChecklistMessageModel(
+                    id=referenced_id,
+                    student_id=owner_id,
+                    message_date=(NOW + timedelta(days=1)).date(),
+                    dm_channel_id="DOTHER",
+                    message_ts="3.3",
+                    status="sent",
+                )
+            )
+
     service.run_due()
+    messenger.updated.clear()
     with factory() as session:
         item = session.scalar(select(ChecklistModel).where(ChecklistModel.student_id == student_id))
 
-    service.handle_action(
-        WORKSPACE,
-        "UONE",
-        daily.dm_channel_id,
-        daily.message_ts,
-        "complete",
-        json.dumps({"daily": str(uuid4()), "item": str(item.id)}),
-    )
+    with pytest.raises(ChecklistActionError):
+        service.handle_action(
+            WORKSPACE,
+            "UONE",
+            daily.dm_channel_id,
+            daily.message_ts,
+            operation,
+            json.dumps({"daily": str(referenced_id), "item": str(item.id)}),
+        )
 
     with factory() as session:
-        assert session.get(ChecklistModel, item.id).completed_at is not None
-    assert messenger.updated[-1][:2] == (daily.dm_channel_id, daily.message_ts)
+        assert session.get(ChecklistModel, item.id).completed_at is None
+        stored = session.get(DailyChecklistMessageModel, daily.id)
+        assert not stored.show_completed and stored.page == 0
+    assert messenger.updated == []
 
 
 @pytest.mark.parametrize(
@@ -1120,7 +1160,7 @@ def test_button_diagnostics_identify_exact_message_mismatch(daily_system, caplog
         assert len(session.scalars(select(StudentModel)).all()) == 2
 
 
-def test_button_diagnostics_report_fallback_and_success(daily_system, caplog):
+def test_button_diagnostics_report_exact_match_and_success(daily_system, caplog):
     factory, _, _, _, service = daily_system
     add_student(factory)
     service.run_due()
@@ -1133,12 +1173,12 @@ def test_button_diagnostics_report_fallback_and_success(daily_system, caplog):
         daily.dm_channel_id,
         daily.message_ts,
         "completed",
-        json.dumps({"daily": str(uuid4())}),
+        json.dumps({"daily": str(daily.id)}),
         trace_id="test-trace",
     )
     logs = [json.loads(record.getMessage()) for record in caplog.records]
     validation = next(entry for entry in logs if entry["event"] == "checklist_message_validation")
-    assert validation["result"] == "address_fallback"
+    assert validation["result"] == "payload_match"
     assert validation["matched_daily_id"] == str(daily.id)
     assert logs[-1]["event"] == "checklist_action_result"
     assert logs[-1]["saved"] and logs[-1]["dm_synchronized"]

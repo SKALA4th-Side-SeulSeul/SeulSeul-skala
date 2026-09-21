@@ -3,7 +3,6 @@
 import logging
 from collections.abc import Callable, Collection
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -27,16 +26,6 @@ from seulseul.users.model import StudentModel
 PAGE_SIZE = 5
 LEASE_SECONDS = 180
 logger = logging.getLogger(__name__)
-
-
-def _same_message_timestamp(expected: str | None, received: str) -> bool:
-    """Slack timestamp의 소수점 자릿수 차이를 허용해 같은 메시지인지 확인한다."""
-    if expected is None or expected == received:
-        return expected == received
-    try:
-        return Decimal(expected) == Decimal(received)
-    except (InvalidOperation, ValueError):
-        return False
 
 
 def set_notice_checklists_deleted(
@@ -297,26 +286,6 @@ class SqlAlchemyChecklistRepository:
         return session.execute(statement.limit(1).with_for_update()).scalar_one_or_none()
 
     @staticmethod
-    def _message_by_address(
-        session: Session, student_id: UUID, channel_id: str, message_ts: str
-    ) -> DailyChecklistMessageModel | None:
-        """payload ID가 오래돼도 학생에게 저장된 동일 Slack 메시지를 찾는다."""
-        model = DailyChecklistMessageModel
-        rows = session.execute(
-            select(model)
-            .where(
-                model.student_id == student_id,
-                model.dm_channel_id == channel_id,
-                model.message_ts.is_not(None),
-            )
-            .with_for_update()
-        ).scalars()
-        return next(
-            (row for row in rows if _same_message_timestamp(row.message_ts, message_ts)),
-            None,
-        )
-
-    @staticmethod
     def _eligible(channels: Collection[str], now: datetime) -> tuple:
         return (
             NoticeModel.channel_id.in_(channels),
@@ -427,27 +396,29 @@ class SqlAlchemyChecklistRepository:
                 raise ChecklistActionError(
                     "가입 정보가 바뀌었습니다. 최신 체크리스트를 확인해 주세요."
                 )
-            daily = self._message_for_student(session, student.id, daily_id=daily_id)
-            payload_daily = daily
+            daily = self._message_for_student(session, student.id)
+            referenced = (
+                daily
+                if daily is not None and daily.id == daily_id
+                else session.get(DailyChecklistMessageModel, daily_id)
+            )
+            payload_daily = (
+                referenced
+                if referenced is not None and referenced.student_id == student.id
+                else None
+            )
             reason = "match"
-            if daily is None:
-                referenced = session.get(DailyChecklistMessageModel, daily_id)
-                reason = "delivery_not_found" if referenced is None else "delivery_owner_mismatch"
+            if referenced is None:
+                reason = "delivery_not_found"
+            elif payload_daily is None:
+                reason = "delivery_owner_mismatch"
+            elif daily is None or daily.id != daily_id:
+                reason = "delivery_not_current"
             elif daily.dm_channel_id != channel_id:
                 reason = "channel_mismatch"
-            elif not _same_message_timestamp(daily.message_ts, message_ts):
+            elif daily.message_ts != message_ts:
                 reason = "timestamp_mismatch"
-            if (
-                daily is None
-                or daily.dm_channel_id != channel_id
-                or not _same_message_timestamp(daily.message_ts, message_ts)
-            ):
-                daily = self._message_by_address(session, student.id, channel_id, message_ts)
-            rejected = (
-                daily is None
-                or daily.dm_channel_id != channel_id
-                or not _same_message_timestamp(daily.message_ts, message_ts)
-            )
+            rejected = reason != "match"
             candidates = []
             if rejected:
                 # 다른 학생의 값은 기록하지 않는다. 누락/재생성 여부를 볼 소수의 기록만 조회한다.
@@ -462,13 +433,11 @@ class SqlAlchemyChecklistRepository:
                 logging.WARNING if rejected else logging.INFO,
                 "checklist_message_validation",
                 trace_id=trace_id,
-                result="rejected"
-                if rejected
-                else ("payload_match" if reason == "match" else "address_fallback"),
+                result="rejected" if rejected else "payload_match",
                 reason=reason,
                 student_id=str(student.id),
                 payload_daily_id=str(daily_id),
-                matched_daily_id=str(daily.id) if daily else None,
+                matched_daily_id=str(daily.id) if not rejected else None,
                 payload_record_owned=payload_daily is not None,
                 received_channel_ref=identifier_ref(channel_id),
                 received_message_ts=timestamp_for_log(message_ts),
@@ -481,9 +450,7 @@ class SqlAlchemyChecklistRepository:
                 channel_matches=payload_daily.dm_channel_id == channel_id
                 if payload_daily
                 else None,
-                timestamp_matches=_same_message_timestamp(payload_daily.message_ts, message_ts)
-                if payload_daily
-                else None,
+                timestamp_matches=payload_daily.message_ts == message_ts if payload_daily else None,
                 record_status=payload_daily.status if payload_daily else None,
                 student_records_sample=[
                     {

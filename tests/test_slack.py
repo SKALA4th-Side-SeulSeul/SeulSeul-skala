@@ -11,9 +11,11 @@ from uuid import uuid4
 
 import pytest
 from slack_bolt import App
+from slack_bolt.context.respond import Respond
 from slack_sdk.errors import SlackApiError
 from slack_sdk.models.blocks import Block
 from slack_sdk.web import SlackResponse
+from slack_sdk.webhook import WebhookClient
 
 from seulseul.checklists.model import (
     ChecklistActionError,
@@ -311,7 +313,12 @@ def test_command_responder_sends_only_to_command_user() -> None:
     assert respond.calls == []
     responder.send("가입이 완료되었습니다.")
 
-    assert respond.calls == [(("가입이 완료되었습니다.",), {"response_type": "ephemeral"})]
+    assert respond.calls == [
+        (
+            ("가입이 완료되었습니다.",),
+            {"response_type": "ephemeral", "replace_original": False, "delete_original": False},
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1149,6 +1156,35 @@ def test_checklist_handler_reports_errors_only_through_responder(error):
     )
     assert respond.calls[0][1]["response_type"] == "ephemeral"
     assert "sensitive" not in str(respond.calls)
+
+
+@pytest.mark.parametrize("case", ["rejected", "malformed", "unexpected", "update_pending"])
+def test_button_response_preserves_source_message_in_actual_bolt_payload(monkeypatch, case):
+    sent = []
+    monkeypatch.setattr(WebhookClient, "send_dict", lambda self, body: sent.append(body))
+    respond = Respond(response_url="https://hooks.example.test/actions/fake")
+    service = Mock()
+    body = action_body()
+    if case == "rejected":
+        service.handle_action.side_effect = ChecklistActionError(
+            "현재 연결된 본인의 체크리스트에서만 변경할 수 있습니다."
+        )
+    elif case == "malformed":
+        body["actions"] = []
+    elif case == "unexpected":
+        service.handle_action.side_effect = RuntimeError("private-details")
+    else:
+        service.handle_action.return_value = False
+
+    create_checklist_action_handler(service)(
+        RecordingAck(), respond, body, logging.getLogger("test")
+    )
+
+    assert len(sent) == 1
+    assert sent[0]["response_type"] == "ephemeral"
+    assert sent[0].get("replace_original") is False
+    assert sent[0].get("delete_original") is False
+    assert "private-details" not in str(sent)
 
 
 def test_checklist_action_listener_registers_without_live_api():
