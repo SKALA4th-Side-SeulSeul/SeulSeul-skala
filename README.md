@@ -151,7 +151,15 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 
 이번 버전 이전 실패 행은 자동 오류 분류가 없으므로 소급 예약하지 않습니다. 예약이 없는 실패 행은 CLI로 재처리할 수 있고, 수동 재처리의 AI 분석이 다시 일시 장애로 실패하면 새 자동 재처리 예산을 시작합니다. 수동 permalink 조회 단계에서 실패하면 기존 횟수·예약·실패 기록을 유지합니다. 같은 원본 이벤트는 중복 처리를 생략하지만 같은 링크라도 새 메시지로 재게시하면 D-027에 따라 새 원본으로 분석합니다. `list`에 다음 예약과 횟수를 표시합니다. 예약 표시 시각은 저장된 시간대 기준입니다.
 
-운영 Docker 환경에서는 실행 중인 봇 컨테이너에서 다음과 같이 실행합니다. 이 명령은 두 번째 봇을 시작하지 않습니다.
+운영 Docker 환경에서는 프로젝트 루트의 `./retry.sh`로 실패 공지를 조회·재처리할 수 있습니다. 인자 없이 실행하면 목록만 조회하며, `retry`를 명시해야 AI를 호출합니다. 이 스크립트는 두 번째 봇을 시작하지 않고 일회성 운영 컨테이너에서 CLI를 실행합니다.
+
+```bash
+./retry.sh list
+./retry.sh pending
+./retry.sh retry --workspace-id '<워크스페이스 ID>' --url '<제출 링크>' --channel-id '<채널 ID>' --message-ts '<메시지 ts>'
+```
+
+직접 Docker Compose 명령을 사용해야 한다면 다음과 같이 실행합니다.
 
 ```bash
 docker compose -f compose.prod.yaml exec -T bot python -m seulseul.notices.retry list
