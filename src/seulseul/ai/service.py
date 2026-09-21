@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from seulseul.ai.client import MAX_RETRY_AFTER_SECONDS, AiClientError, ChatClient
-from seulseul.ai.deadline import CLOCK, DATE, expected_deadline
+from seulseul.ai.deadline import CLOCK, DATE, RELATIVE, expected_deadline
 from seulseul.ai.model import NoticeAnalysis
 
 MAX_NOTICE_INPUT_CHARS = 12_000
@@ -47,9 +47,9 @@ title은 255자 이하여야 한다.
 
 분석할 공지 본문은 사용자 메시지의 [공지 원문 시작]과 [공지 원문 끝] 사이에만 있다.
 Slack 게시 시각, 대상 링크, 구분 표시는 메타데이터이므로 title·summary·deadline_source_text에
-메타데이터 문구를 사용하지 않는다. deadline_source_text는 공지 본문에서 날짜와 시각을
-포함한 마감 표현을 그대로 복사한다. 예를 들어 본문에 "9월 30일 오후 6시까지"가 있으면
-deadline_source_text도 정확히 "9월 30일 오후 6시까지"여야 한다.
+메타데이터 문구를 사용하지 않는다. deadline_source_text에는 선택한 마감일을 판단한
+원문 근거를 사람이 이해할 수 있게 적는다. Slack 마크다운, 띄어쓰기, 숫자 표기(예:
+18:00과 오후 6시), 주변 설명 문구는 달라도 되지만 원문에 없는 날짜·시각은 만들지 않는다.
 """
 
 
@@ -154,8 +154,6 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         deadline_at = deadline_at.astimezone(SEOUL_TIMEZONE)
     except (ValueError, OverflowError) as error:
         raise AiClientError("AI 마감일이 지원 범위를 벗어났습니다.") from error
-    if values["deadline_source_text"] not in notice_text:
-        raise AiClientError("AI가 반환한 마감 표현이 공지 원문에 없습니다.")
     evidence = values["deadline_source_text"]
     # 날짜만 인용해 같은 줄의 명시 시각을 누락하는 경우도 검증한다.
     lines = [line for line in notice_text.splitlines() if evidence in line]
@@ -176,6 +174,8 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
             "원문에 시각이 있습니다. 마감 근거에 날짜와 시각을 함께 인용해야 합니다."
         )
     expected = expected_deadline(evidence, posted_at)
+    if expected not in _source_deadline_candidates(notice_text, posted_at):
+        raise AiClientError("AI가 반환한 마감 날짜·시간이 공지 원문에서 확인되지 않습니다.")
     posted_at_seoul = posted_at.astimezone(SEOUL_TIMEZONE)
     if (
         deadline_at < posted_at_seoul
@@ -197,6 +197,32 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         deadline_at=deadline_at,
         deadline_source_text=values["deadline_source_text"],
     )
+
+
+def _source_deadline_candidates(notice_text: str, posted_at: datetime) -> set[datetime]:
+    """원문에서 독립적으로 계산 가능한 날짜·시각 후보를 반환한다."""
+    source_without_urls = re.sub(r"https?://[^\s<>|]+", "", notice_text)
+    candidates: set[datetime] = set()
+    snippets: set[str] = set()
+
+    date_expressions = list(DATE.finditer(source_without_urls)) + list(
+        RELATIVE.finditer(source_without_urls)
+    )
+    clock_expressions = list(CLOCK.finditer(source_without_urls))
+    if len(date_expressions) == 1 and len(clock_expressions) <= 1:
+        snippets.add(source_without_urls)
+
+    for line in source_without_urls.splitlines():
+        line_date_expressions = list(DATE.finditer(line)) + list(RELATIVE.finditer(line))
+        if len(line_date_expressions) == 1 and len(CLOCK.findall(line)) <= 1:
+            snippets.add(line)
+
+    for snippet in snippets:
+        try:
+            candidates.add(expected_deadline(snippet, posted_at))
+        except AiClientError:
+            continue
+    return candidates
 
 
 def _same_month_day_and_time(first: datetime, second: datetime) -> bool:
