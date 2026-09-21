@@ -38,16 +38,18 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | --- | --- |
 | `./run.sh setup` | `.env`가 없을 때만 권한 600으로 템플릿 생성. 기존 설정은 보존 |
 | `nano .env` | 운영 환경변수 직접 편집. `APP_ENV=production`, `AI_PROVIDER=nvidia`, DB 주소 `postgres:5432` |
-| `./run.sh` | 이미지 빌드 → 기존 봇 중지 → DB healthy 대기 → 마이그레이션 → 봇 하나 재생성 |
+| `./run.sh` | 이미지 빌드 → 기존 봇·OAuth 서버 중지 → DB healthy 대기 → 마이그레이션 → 재생성 |
 | `./run.sh postgres` | PostgreSQL만 실행·healthy 대기 |
-| `./run.sh migrate` | 빌드·봇 중지·DB 준비·마이그레이션. 봇은 중지 상태 유지 |
+| `./run.sh migrate` | 빌드·봇·OAuth 중지·DB 준비·마이그레이션. 서비스는 중지 상태 유지 |
 | `./stop.sh` | 봇과 DB 순서대로 중지, 컨테이너·데이터 볼륨 보존 |
 | `./stop.sh bot` | 봇만 중지, DB 유지 |
+| `./stop.sh oauth` | OAuth HTTP 서버만 중지, 봇·DB 유지 |
 | `./stop.sh postgres` | DB 중지 전 의존하는 봇도 중지 |
 | `./view.sh` | 전체 컨테이너 상태 (`ps -a`) |
 | `./view.sh logs` | 봇 최근 100줄 및 실시간 로그 |
 | `./view.sh logs postgres` | PostgreSQL 로그 |
-| `./view.sh logs all` | 봇·DB 로그 함께 보기 |
+| `./view.sh logs oauth` | OAuth HTTP 서버 로그 |
+| `./view.sh logs all` | 봇·OAuth·DB 로그 함께 보기 |
 | `./view.sh db` | 기본 읽기 전용 psql 접속. 종료는 `\q` |
 | `./view.sh schema` | DB 테이블 목록 |
 | `./view.sh config` | 환경변수 값을 출력하지 않고 Compose 구성 검증 |
@@ -87,6 +89,32 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 - 로그 보기에서 `Ctrl+C`는 봇을 중지하지 않습니다. 컨테이너 시작은 Slack 연결 성공을 보장하지 않으므로 로그 확인이 필요합니다. 로그에는 기존 오류로 노출된 키·개인정보가 있을 수 있어 공유 전 가려야 합니다.
 - `view.sh db`는 기본 읽기 전용 옵션이지 권한이 제한된 별도 DB 계정은 아닙니다. 임의로 쓰기 설정을 해제하지 마세요. DB 포트는 외부에 공개하지 않습니다.
 - 스크립트는 운영 서버에서 직접 검증해야 합니다. 자동 테스트는 가짜 Docker로 명령 순서·실패 시 중단·데이터 보존을 검증하며 실제 컨테이너를 조작하지 않습니다.
+
+### 외부 워크스페이스 설치(OAuth)
+
+외부 워크스페이스 설치는 `oauth` 컨테이너가 담당합니다. `bot` 컨테이너의 Socket Mode와 별도로
+`127.0.0.1:8080`에만 바인딩되며, 호스트의 고정 ngrok 터널이 이 포트로 연결됩니다.
+
+서버 `.env`에 Slack 앱 `Basic Information → App Credentials`의 값을 입력합니다.
+
+```dotenv
+SLACK_CLIENT_ID=
+SLACK_CLIENT_SECRET=
+SLACK_SIGNING_SECRET=
+SLACK_REDIRECT_URI=https://고정-ngrok-주소.ngrok-free.dev/slack/oauth/callback
+```
+
+Slack 앱 `OAuth & Permissions → Redirect URLs`에도 `SLACK_REDIRECT_URI`와 같은 주소를 등록합니다.
+`./run.sh` 후 아래 주소를 브라우저에서 열면 OAuth 설치를 시작합니다.
+
+```text
+https://고정-ngrok-주소.ngrok-free.dev/slack/install
+```
+
+설치·state 정보는 `oauth_data` Docker 볼륨에 저장되며, OAuth callback query string은 access log에 남기지 않습니다.
+실제 설치 결과 토큰을 사용해 외부 워크스페이스의 공지·DM을 처리하려면 워크스페이스별 Slack authorization을
+봇 업무 서비스에 연결하는 후속 작업도 필요합니다. 현재 기존 Socket Mode 업무 흐름은 기존
+`SLACK_BOT_TOKEN` 워크스페이스를 계속 사용합니다.
 
 ## 최초 연결 후 계속 갱신하는 개인 체크리스트
 

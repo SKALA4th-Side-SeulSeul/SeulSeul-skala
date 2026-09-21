@@ -55,5 +55,28 @@ services:
     restart: unless-stopped
     mem_limit: 512m
 
+  oauth:
+    <<: *bot-common
+    command:
+      - gunicorn
+      - --bind
+      - 0.0.0.0:8080
+      - --workers
+      - "1"
+      - --threads
+      - "2"
+      - seulseul.oauth_wsgi:app
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL을 운영 서버 .env에 설정하세요}
+      SLACK_OAUTH_PORT: ${SLACK_OAUTH_PORT:-8080}
+      SLACK_OAUTH_STORAGE_DIR: /var/lib/seulseul/oauth
+    ports:
+      - "127.0.0.1:${SLACK_OAUTH_PORT:-8080}:8080"
+    volumes:
+      - oauth_data:/var/lib/seulseul/oauth
+    restart: unless-stopped
+    mem_limit: 256m
+
 volumes:
   postgres_prod_data:
+  oauth_data:

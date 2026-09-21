@@ -12,9 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_production_database_port_is_only_bound_to_ipv4_loopback():
     config = (ROOT / "compose.prod.yaml").read_text()
-    assert config.count("    ports:\n") == 1
+    assert config.count("    ports:\n") == 2
     assert '    ports:\n      - "127.0.0.1:5432:5432"\n' in config
-    assert "0.0.0.0" not in config and "[::]" not in config
+    assert '      - "127.0.0.1:${SLACK_OAUTH_PORT:-8080}:8080"\n' in config
+    assert '      - "0.0.0.0' not in config and '      - "[::]' not in config
     assert "postgres_prod_data:/var/lib/postgresql" in config
 
 
@@ -89,11 +90,11 @@ def test_run_builds_stops_migrates_then_recreates_single_bot(operations):
     steps = calls()
     expected = [
         "config --quiet",
-        "build bot migrate",
-        "stop bot",
+        "build bot migrate oauth",
+        "stop bot oauth",
         "up -d --wait --wait-timeout 180 postgres",
         "run --rm migrate",
-        "up -d --no-deps --force-recreate --scale bot=1 bot",
+        "up -d --no-deps --force-recreate --scale bot=1 bot oauth",
         "ps -a",
     ]
     assert len(steps) == len(expected) + 2
@@ -164,14 +165,16 @@ def test_notice_edit_requires_safe_operations_setup(operations, invalid):
     assert not any(" run " in call for call in calls())
 
 
-@pytest.mark.parametrize("failure", ["build bot migrate", "run --rm migrate", "config --quiet"])
+@pytest.mark.parametrize(
+    "failure", ["build bot migrate oauth", "run --rm migrate", "config --quiet"]
+)
 def test_run_failure_never_starts_bot(operations, failure):
     repo, run, calls = operations
     (repo / "fail-step").write_text(failure + "\n")
     assert run("run.sh").returncode == 17
     assert not any("--force-recreate" in call for call in calls())
     if failure != "run --rm migrate":
-        assert not any(call.endswith("stop bot") for call in calls())
+        assert not any(call.endswith("stop bot oauth") for call in calls())
 
 
 @pytest.mark.parametrize("operation", ["all", "bot", "postgres"])
@@ -179,8 +182,13 @@ def test_stop_preserves_data_and_stops_bot_before_database(operations, operation
     _, run, calls = operations
     assert run("stop.sh", operation).returncode == 0
     steps = calls()
-    assert steps[3].endswith("stop bot")
-    if operation != "bot":
+    if operation == "bot":
+        assert steps[3].endswith("stop bot")
+    elif operation == "postgres":
+        assert steps[3].endswith("stop bot oauth postgres")
+    else:
+        assert steps[3].endswith("stop bot oauth")
+    if operation == "all":
         assert steps[4].endswith("stop postgres")
     assert not any(" down" in call or "volume" in call for call in steps)
 

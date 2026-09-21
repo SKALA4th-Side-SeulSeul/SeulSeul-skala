@@ -3,7 +3,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/operations.sh"
 
 usage() {
-    echo '사용법: ./view.sh [status|logs [bot|postgres|all]|db|schema|config|--help]'
+    echo '사용법: ./view.sh [status|logs [bot|oauth|postgres|all]|db|schema|config|--help]'
     echo '  status(기본): 컨테이너 상태 / logs: 최근 100줄 및 실시간 로그'
     echo '  db: 읽기 전용 psql 접속 (종료: \q) / schema: 테이블 목록'
     echo '  config: 값 출력 없이 Compose 설정 검증'
@@ -16,7 +16,7 @@ case "$operation" in
     status|db|schema|config)
         [[ $# -le 1 ]] || { usage; exit 2; } ;;
     logs)
-        case "${2:-bot}" in bot|postgres|all) ;; *) usage; exit 2 ;; esac ;;
+        case "${2:-bot}" in bot|oauth|postgres|all) ;; *) usage; exit 2 ;; esac ;;
     *) usage; exit 2 ;;
 esac
 require_operations
@@ -24,7 +24,7 @@ case "$operation" in
     status) compose ps -a ;;
     logs)
         if [[ "${2:-bot}" == all ]]; then
-            compose logs --tail 100 -f bot postgres
+            compose logs --tail 100 -f bot oauth postgres
         else
             compose logs --tail 100 -f "${2:-bot}"
         fi ;;

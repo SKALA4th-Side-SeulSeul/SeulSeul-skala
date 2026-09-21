@@ -10,6 +10,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,18 @@ DEFAULT_AI_TIMEOUT_SECONDS = 45.0
 # Ollama는 API 키를 검사하지 않지만 OpenAI 호환 요청 형식상 값이 필요하다.
 OLLAMA_PLACEHOLDER_API_KEY = "ollama"
 SLACK_CHANNEL_ID_PATTERN = re.compile(r"^[CG][A-Z0-9]+$")
+SLACK_OAUTH_SCOPE_PATTERN = re.compile(r"^[a-z][a-z0-9_.:-]*$")
+DEFAULT_SLACK_OAUTH_INSTALL_PATH = "/slack/install"
+DEFAULT_SLACK_OAUTH_REDIRECT_PATH = "/slack/oauth/callback"
+DEFAULT_SLACK_OAUTH_SCOPES = (
+    "channels:history",
+    "commands",
+    "groups:history",
+    "users:read",
+    "chat:write",
+    "im:write",
+    "im:history",
+)
 
 
 class ConfigError(Exception):
@@ -44,6 +57,25 @@ class SlackSettings:
     notice_channels: tuple[str, ...]
     # 봇 이벤트는 받지 않고 운영자 CLI로만 처리하는 채널입니다.
     manual_notice_channels: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SlackOAuthSettings:
+    """외부 워크스페이스 설치용 OAuth 설정.
+
+    설치 결과의 Bot Token은 이 설정에 넣지 않는다. Bolt의 installation store가
+    워크스페이스별 토큰을 보관하며, Client Secret·Signing Secret은 환경변수에서만 읽는다.
+    """
+
+    client_id: str
+    client_secret: str
+    signing_secret: str
+    redirect_uri: str
+    scopes: tuple[str, ...]
+    storage_dir: str
+    port: int
+    install_path: str = DEFAULT_SLACK_OAUTH_INSTALL_PATH
+    redirect_uri_path: str = DEFAULT_SLACK_OAUTH_REDIRECT_PATH
 
 
 @dataclass(frozen=True)
@@ -149,6 +181,62 @@ def load_slack_settings(environ: Mapping[str, str] | None = None) -> SlackSettin
     )
 
 
+def load_oauth_settings(environ: Mapping[str, str] | None = None) -> SlackOAuthSettings:
+    """외부 워크스페이스 Slack OAuth 설정을 읽고 공개 URL을 검증한다."""
+    environ = _resolve_environ(environ)
+    _raise_if_missing(
+        environ,
+        [
+            "SLACK_CLIENT_ID",
+            "SLACK_CLIENT_SECRET",
+            "SLACK_SIGNING_SECRET",
+            "SLACK_REDIRECT_URI",
+        ],
+    )
+
+    redirect_uri = _read(environ, "SLACK_REDIRECT_URI")
+    parsed_redirect_uri = urlsplit(redirect_uri)
+    if (
+        parsed_redirect_uri.scheme != "https"
+        or not parsed_redirect_uri.netloc
+        or parsed_redirect_uri.query
+        or parsed_redirect_uri.fragment
+        or parsed_redirect_uri.path != DEFAULT_SLACK_OAUTH_REDIRECT_PATH
+    ):
+        raise ConfigError(
+            "SLACK_REDIRECT_URI는 쿼리·fragment가 없는 HTTPS 공개 URL이어야 하며 "
+            f"'{DEFAULT_SLACK_OAUTH_REDIRECT_PATH}' 경로를 사용해야 합니다."
+        )
+
+    raw_scopes = _read(environ, "SLACK_OAUTH_SCOPES")
+    scopes = tuple(
+        scope.strip()
+        for scope in (raw_scopes.split(",") if raw_scopes else DEFAULT_SLACK_OAUTH_SCOPES)
+        if scope.strip()
+    )
+    if (
+        not scopes
+        or len(set(scopes)) != len(scopes)
+        or any(SLACK_OAUTH_SCOPE_PATTERN.fullmatch(scope) is None for scope in scopes)
+    ):
+        raise ConfigError(
+            "SLACK_OAUTH_SCOPES에는 중복 없는 Slack scope를 쉼표로 구분해 입력하세요."
+        )
+
+    raw_storage_dir = _read(environ, "SLACK_OAUTH_STORAGE_DIR")
+    storage_dir = raw_storage_dir or str(PROJECT_ROOT / "data" / "oauth")
+    port = _read_port(environ)
+    return SlackOAuthSettings(
+        client_id=_read(environ, "SLACK_CLIENT_ID"),
+        client_secret=_read(environ, "SLACK_CLIENT_SECRET"),
+        signing_secret=_read(environ, "SLACK_SIGNING_SECRET"),
+        redirect_uri=redirect_uri,
+        scopes=scopes,
+        storage_dir=storage_dir,
+        port=port,
+    )
+
+
 def load_ai_settings(environ: Mapping[str, str] | None = None) -> AiSettings | None:
     """AI 요약 설정을 읽는다. AI_PROVIDER가 비어 있으면 None을 반환한다.
 
@@ -231,3 +319,14 @@ def _read_timeout_seconds(environ: Mapping[str, str]) -> float:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ConfigError(f"AI_TIMEOUT_SECONDS는 0보다 큰 숫자여야 합니다. 현재 값: {raw_value}")
     return timeout_seconds
+
+
+def _read_port(environ: Mapping[str, str]) -> int:
+    raw_port = _read(environ, "SLACK_OAUTH_PORT") or "8080"
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"SLACK_OAUTH_PORT는 1~65535 정수여야 합니다. 현재 값: {raw_port}")
+    return port

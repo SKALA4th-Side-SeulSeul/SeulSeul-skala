@@ -9,8 +9,10 @@ from seulseul.config import (
     OLLAMA_PLACEHOLDER_API_KEY,
     AiSettings,
     ConfigError,
+    SlackOAuthSettings,
     load_ai_settings,
     load_notice_targets,
+    load_oauth_settings,
     load_slack_settings,
 )
 
@@ -89,6 +91,69 @@ def test_load_slack_settings_rejects_manual_channel_overlap() -> None:
 
     with pytest.raises(ConfigError, match="SLACK_MANUAL_NOTICE_CHANNELS"):
         load_slack_settings(environ)
+
+
+def test_load_oauth_settings_reads_credentials_and_paths() -> None:
+    settings = load_oauth_settings(
+        {
+            "SLACK_CLIENT_ID": "123456789.123456789",
+            "SLACK_CLIENT_SECRET": "client-secret",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "SLACK_REDIRECT_URI": "https://example.ngrok-free.dev/slack/oauth/callback",
+            "SLACK_OAUTH_SCOPES": " chat:write, channels:history, users:read ",
+            "SLACK_OAUTH_STORAGE_DIR": "/var/lib/seulseul/oauth",
+            "SLACK_OAUTH_PORT": "8080",
+        }
+    )
+
+    assert settings == SlackOAuthSettings(
+        client_id="123456789.123456789",
+        client_secret="client-secret",
+        signing_secret="signing-secret",
+        redirect_uri="https://example.ngrok-free.dev/slack/oauth/callback",
+        scopes=("chat:write", "channels:history", "users:read"),
+        storage_dir="/var/lib/seulseul/oauth",
+        port=8080,
+        install_path="/slack/install",
+        redirect_uri_path="/slack/oauth/callback",
+    )
+
+
+def test_load_oauth_settings_rejects_non_https_redirect_uri() -> None:
+    with pytest.raises(ConfigError, match="SLACK_REDIRECT_URI"):
+        load_oauth_settings(
+            {
+                "SLACK_CLIENT_ID": "client-id",
+                "SLACK_CLIENT_SECRET": "client-secret",
+                "SLACK_SIGNING_SECRET": "signing-secret",
+                "SLACK_REDIRECT_URI": "http://example.com/slack/oauth/callback",
+            }
+        )
+
+
+def test_load_oauth_settings_reports_missing_credentials_without_leaking_values() -> None:
+    with pytest.raises(ConfigError) as error:
+        load_oauth_settings({"SLACK_CLIENT_SECRET": "client-secret"})
+
+    message = str(error.value)
+    assert "SLACK_CLIENT_ID" in message
+    assert "SLACK_SIGNING_SECRET" in message
+    assert "SLACK_REDIRECT_URI" in message
+    assert "client-secret" not in message
+
+
+@pytest.mark.parametrize("raw_port", ["0", "65536", "abc"])
+def test_load_oauth_settings_rejects_invalid_port(raw_port: str) -> None:
+    with pytest.raises(ConfigError, match="SLACK_OAUTH_PORT"):
+        load_oauth_settings(
+            {
+                "SLACK_CLIENT_ID": "client-id",
+                "SLACK_CLIENT_SECRET": "client-secret",
+                "SLACK_SIGNING_SECRET": "signing-secret",
+                "SLACK_REDIRECT_URI": "https://example.com/slack/oauth/callback",
+                "SLACK_OAUTH_PORT": raw_port,
+            }
+        )
 
 
 @pytest.mark.parametrize("provider", ["", "   ", "none", "NONE"])
