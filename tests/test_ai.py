@@ -301,6 +301,25 @@ def test_accepts_equivalent_deadline_evidence_with_slack_formatting() -> None:
     assert result.deadline_at == datetime(2026, 10, 5, 18, tzinfo=SEOUL)
 
 
+def test_accepts_deadline_evidence_with_extra_date_context() -> None:
+    notice_text = (
+        "보안 공지\n민감 정보가 Git에 올라가지 않도록 *2026년 10월 5일 18:00까지* 확인해 주세요."
+    )
+
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at="2026-10-05T18:00:00+09:00",
+            deadline_source_text=(
+                "Slack 게시 시각 2026년 9월 21일 기준, 2026년 10월 5일 18:00까지 확인해 주세요"
+            ),
+        ),
+        notice_text,
+        POSTED_AT,
+    )
+
+    assert result.deadline_at == datetime(2026, 10, 5, 18, tzinfo=SEOUL)
+
+
 def test_explicit_past_year_is_not_repaired() -> None:
     with pytest.raises(AiClientError, match="과거"):
         parse_notice_analysis(

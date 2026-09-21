@@ -173,22 +173,34 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         raise AiClientError(
             "원문에 시각이 있습니다. 마감 근거에 날짜와 시각을 함께 인용해야 합니다."
         )
-    expected = expected_deadline(evidence, posted_at)
-    if expected not in _source_deadline_candidates(notice_text, posted_at):
+    evidence_without_urls = re.sub(r"https?://[^\s<>|]+", "", evidence)
+    evidence_date_expressions = list(DATE.finditer(evidence_without_urls)) + list(
+        RELATIVE.finditer(evidence_without_urls)
+    )
+    if not evidence_date_expressions:
+        raise AiClientError("AI 마감 근거에 날짜가 없습니다.")
+    evidence_expected = _try_expected_deadline(evidence, posted_at)
+    source_candidates = _source_deadline_candidates(notice_text, posted_at)
+    if evidence_expected is not None and evidence_expected not in source_candidates:
+        raise AiClientError("AI가 반환한 마감 날짜·시간이 공지 원문에서 확인되지 않습니다.")
+    if not source_candidates:
         raise AiClientError("AI가 반환한 마감 날짜·시간이 공지 원문에서 확인되지 않습니다.")
     posted_at_seoul = posted_at.astimezone(SEOUL_TIMEZONE)
-    if (
-        deadline_at < posted_at_seoul
-        and expected >= posted_at_seoul
-        and not any(match.group("year") for match in DATE.finditer(evidence))
-        and _same_month_day_and_time(deadline_at, expected)
+    if deadline_at not in source_candidates and not any(
+        match.group("year") for match in DATE.finditer(evidence_without_urls)
     ):
-        # 원문에 연도가 없으면 게시 연도를 사용한다는 제품 규칙을 적용한다.
-        # 소형 모델이 날짜·시각은 맞추고 학습 데이터의 과거 연도만 붙이는 경우를 보정한다.
-        deadline_at = expected
+        repaired_candidates = [
+            candidate
+            for candidate in source_candidates
+            if candidate >= posted_at_seoul and _same_month_day_and_time(deadline_at, candidate)
+        ]
+        if len(repaired_candidates) == 1:
+            # 원문에 연도가 없으면 Slack 게시 연도를 사용한다는 제품 규칙을 적용한다.
+            # 소형 모델이 날짜·시각은 맞추고 학습 데이터의 과거 연도만 붙이는 경우를 보정한다.
+            deadline_at = repaired_candidates[0]
     if deadline_at < posted_at_seoul:
         raise AiClientError("AI가 추출한 마감일이 Slack 게시 시각보다 과거입니다.")
-    if deadline_at != expected:
+    if deadline_at not in source_candidates:
         raise AiClientError("AI 마감일이 원문의 날짜·시각과 일치하지 않습니다.")
 
     return NoticeAnalysis(
@@ -197,6 +209,20 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         deadline_at=deadline_at,
         deadline_source_text=values["deadline_source_text"],
     )
+
+
+def _try_expected_deadline(evidence: str, posted_at: datetime) -> datetime | None:
+    """날짜가 하나로 식별되는 AI 근거만 독립적으로 계산한다."""
+    evidence_without_urls = re.sub(r"https?://[^\s<>|]+", "", evidence)
+    date_expressions = list(DATE.finditer(evidence_without_urls)) + list(
+        RELATIVE.finditer(evidence_without_urls)
+    )
+    if len(date_expressions) != 1:
+        return None
+    try:
+        return expected_deadline(evidence, posted_at)
+    except AiClientError:
+        return None
 
 
 def _source_deadline_candidates(notice_text: str, posted_at: datetime) -> set[datetime]:
@@ -214,7 +240,7 @@ def _source_deadline_candidates(notice_text: str, posted_at: datetime) -> set[da
 
     for line in source_without_urls.splitlines():
         line_date_expressions = list(DATE.finditer(line)) + list(RELATIVE.finditer(line))
-        if len(line_date_expressions) == 1 and len(CLOCK.findall(line)) <= 1:
+        if len(line_date_expressions) == 1 and len(list(CLOCK.finditer(line))) <= 1:
             snippets.add(line)
 
     for snippet in snippets:
