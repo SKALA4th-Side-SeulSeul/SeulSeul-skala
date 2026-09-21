@@ -178,6 +178,11 @@ def test_analyzer_returns_validated_json_result() -> None:
         in client.calls[0][0]
     )
     assert "신청 마감과 행사 일시가 모두 있으면 신청 마감을 우선한다." in client.calls[0][0]
+    assert "변경 전과 변경 후가 함께 있으면 변경 후의 일정을 선택한다." in client.calls[0][0]
+    assert (
+        "deadline_source_text는 원문에 연속해서 존재하는 날짜·시각 표현만 반환한다."
+        in client.calls[0][0]
+    )
 
 
 def test_analyzer_retries_invalid_json_with_decided_delays() -> None:
