@@ -1392,7 +1392,8 @@ def test_retry_cli_wires_dependencies_and_closes_resources(
         ) in capsys.readouterr().out
     elif mode == "retry":
         client.close.assert_called_once_with()
-        assert client_constructor.call_args.kwargs["disable_thinking"] is False
+        assert client_constructor.call_args.kwargs["provider"] == "ollama"
+        assert client_constructor.call_args.kwargs["disable_thinking"] is True
         service.retry_failed_notice.assert_called_once_with(
             WORKSPACE_ID,
             failed_notice().original_url,

@@ -58,7 +58,8 @@ def create_notice_service(
         api_key=ai_settings.api_key,
         model=ai_settings.model,
         timeout_seconds=ai_settings.timeout_seconds,
-        disable_thinking=ai_settings.provider == "nvidia",
+        provider=ai_settings.provider,
+        disable_thinking=True,
     )
     # API 키는 로그에 남기지 않는다.
     logger.info(

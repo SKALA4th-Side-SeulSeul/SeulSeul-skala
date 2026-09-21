@@ -32,10 +32,18 @@ ANALYSIS_SYSTEM_PROMPT = """\
   "deadline_source_text": "원문에 실제로 있는 마감 표현"
 }
 
-시간대는 Asia/Seoul을 사용한다. 시각이 없으면 23:59로 정한다.
+시간대는 Asia/Seoul을 사용한다. `deadline_at`은 반드시 `+09:00` 오프셋을 포함한
+ISO 8601 시각(예: `2026-09-30T18:00:00+09:00`)으로 반환한다. 시각이 없으면 23:59로 정한다.
 연도가 없으면 Slack 게시일의 연도를 사용하고, 상대 날짜는 Slack 게시 시각을 기준으로 계산한다.
 마감일은 정확히 하나여야 한다. deadline_source_text에는 날짜와 시각을 함께 인용한다.
-title은 255자 이하여야 한다."""
+title은 255자 이하여야 한다.
+
+분석할 공지 본문은 사용자 메시지의 [공지 원문 시작]과 [공지 원문 끝] 사이에만 있다.
+Slack 게시 시각, 대상 링크, 구분 표시는 메타데이터이므로 title·summary·deadline_source_text에
+메타데이터 문구를 사용하지 않는다. deadline_source_text는 공지 본문에서 날짜와 시각을
+포함한 마감 표현을 그대로 복사한다. 예를 들어 본문에 "9월 30일 오후 6시까지"가 있으면
+deadline_source_text도 정확히 "9월 30일 오후 6시까지"여야 한다.
+"""
 
 
 class NoticeAnalyzer:
@@ -83,9 +91,12 @@ class NoticeAnalyzer:
             if last_error is not None:
                 feedback = "\n이전 응답은 검증에 실패했다. 형식을 바로잡아 다시 반환한다."
             user_prompt = (
+                "[공지 원문 시작]\n"
+                f"{notice_text}\n"
+                "[공지 원문 끝]\n"
+                "[분석용 메타데이터]\n"
                 f"Slack 게시 시각: {posted_at.astimezone(SEOUL_TIMEZONE).isoformat()}\n"
-                f"대상 링크: {notice_url}\n"
-                f"공지 원문:\n{notice_text}{feedback}"
+                f"대상 링크: {notice_url}{feedback}"
             )
             try:
                 raw_output = self._client.complete(ANALYSIS_SYSTEM_PROMPT, user_prompt)

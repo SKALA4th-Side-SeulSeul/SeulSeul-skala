@@ -1,9 +1,8 @@
-"""OpenAI 호환 chat completions API 클라이언트.
+"""NVIDIA와 Ollama의 chat API 클라이언트.
 
-NVIDIA Build API와 Ollama가 같은 요청 형식(/v1/chat/completions)을 지원해
-클라이언트 하나로 호출한다.
+NVIDIA는 OpenAI 호환 `/v1/chat/completions`를 사용하고, Ollama는 Qwen3의
+thinking 제어가 확실한 네이티브 `/api/chat`을 사용한다.
 외부 AI 호출은 이 모듈에만 둔다(D-002). API 키는 로그와 오류 메시지에 넣지 않는다.
-제공자 선택은 D-013을 따르고, 호출 파라미터와 오류 분류는 D-017을 따른다.
 """
 
 import math
@@ -15,6 +14,19 @@ import httpx
 ANALYSIS_TEMPERATURE = 0.2
 ANALYSIS_TOP_P = 0.8
 MAX_RESPONSE_TOKENS = 512
+OLLAMA_CONTEXT_TOKENS = 2048
+OLLAMA_MAX_RESPONSE_TOKENS = 256
+OLLAMA_KEEP_ALIVE = "5m"
+OLLAMA_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "deadline_at": {"type": "string"},
+        "deadline_source_text": {"type": "string"},
+    },
+    "required": ["title", "summary", "deadline_at", "deadline_source_text"],
+}
 MAX_RETRY_AFTER_SECONDS = 60.0
 # 오류 응답 본문은 원인 파악에 필요한 앞부분만 메시지에 담는다.
 ERROR_BODY_PREVIEW_CHARS = 200
@@ -50,15 +62,20 @@ class OpenAICompatibleChatClient:
         api_key: str,
         model: str,
         timeout_seconds: float,
+        provider: str = "nvidia",
         disable_thinking: bool = False,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        if provider not in {"nvidia", "ollama"}:
+            raise ValueError(f"지원하지 않는 AI 제공자입니다: {provider}")
         self._model = model
+        self._provider = provider
         self._timeout_seconds = timeout_seconds
         self._disable_thinking = disable_thinking
+        client_base_url = _ollama_native_base_url(base_url) if provider == "ollama" else base_url
         # transport는 테스트에서 가짜 응답을 넣기 위해서만 사용한다.
         self._http_client = httpx.Client(
-            base_url=base_url,
+            base_url=client_base_url,
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout_seconds,
             transport=transport,
@@ -66,22 +83,42 @@ class OpenAICompatibleChatClient:
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """시스템 지시와 사용자 입력을 보내고 모델의 답변 텍스트를 반환한다."""
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": ANALYSIS_TEMPERATURE,
-            "top_p": ANALYSIS_TOP_P,
-            "max_tokens": MAX_RESPONSE_TOKENS,
-            "stream": False,
-        }
-        if self._disable_thinking:
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if self._provider == "ollama":
+            payload: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "format": OLLAMA_OUTPUT_SCHEMA,
+                "options": {
+                    "temperature": ANALYSIS_TEMPERATURE,
+                    "top_p": ANALYSIS_TOP_P,
+                    "num_ctx": OLLAMA_CONTEXT_TOKENS,
+                    "num_predict": OLLAMA_MAX_RESPONSE_TOKENS,
+                },
+                "stream": False,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
+            }
+            if self._disable_thinking:
+                payload["think"] = False
+            endpoint = "api/chat"
+        else:
+            payload = {
+                "model": self._model,
+                "messages": messages,
+                "temperature": ANALYSIS_TEMPERATURE,
+                "top_p": ANALYSIS_TOP_P,
+                "max_tokens": MAX_RESPONSE_TOKENS,
+                "stream": False,
+            }
+            if self._disable_thinking:
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
+            endpoint = "chat/completions"
 
         try:
-            response = self._http_client.post("chat/completions", json=payload)
+            response = self._http_client.post(endpoint, json=payload)
         except httpx.TimeoutException as error:
             raise AiClientError(
                 f"AI 응답이 {self._timeout_seconds:g}초 안에 오지 않았습니다. 모델: {self._model}",
@@ -112,11 +149,17 @@ class OpenAICompatibleChatClient:
             )
 
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            response_payload = response.json()
+            if self._provider == "ollama":
+                content = response_payload["message"]["content"]
+            else:
+                content = response_payload["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as error:
-            raise AiClientError(
-                f"AI 응답이 OpenAI 호환 chat completions 형식이 아닙니다. 모델: {self._model}"
-            ) from error
+            if self._provider == "ollama":
+                message = "AI 응답이 Ollama chat 형식이 아닙니다."
+            else:
+                message = "AI 응답이 OpenAI 호환 chat completions 형식이 아닙니다."
+            raise AiClientError(f"{message} 모델: {self._model}") from error
 
         if not isinstance(content, str):
             raise AiClientError(f"AI 응답에 텍스트 내용이 없습니다. 모델: {self._model}")
@@ -124,6 +167,12 @@ class OpenAICompatibleChatClient:
 
     def close(self) -> None:
         self._http_client.close()
+
+
+def _ollama_native_base_url(base_url: str) -> str:
+    """OpenAI 호환 Ollama 주소에서 네이티브 API의 호스트 주소를 만든다."""
+    normalized = base_url.rstrip("/")
+    return normalized.removesuffix("/v1")
 
 
 def _parse_retry_after(raw_value: str | None) -> float | None:

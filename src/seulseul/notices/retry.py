@@ -149,7 +149,8 @@ def main(argv: list[str] | None = None) -> int:
                     api_key=settings.api_key,
                     model=settings.model,
                     timeout_seconds=settings.timeout_seconds,
-                    disable_thinking=settings.provider == "nvidia",
+                    provider=settings.provider,
+                    disable_thinking=True,
                 )
                 resources.callback(client.close)
                 analyzer = NoticeAnalyzer(client)
