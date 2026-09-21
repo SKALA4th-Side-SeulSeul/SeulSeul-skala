@@ -118,6 +118,36 @@ def test_command_reset_replaces_dm_but_preserves_completion_and_other_students(d
     assert len(get_daily(factory)) == 2
 
 
+def test_interactive_manual_edit_preserves_completion_and_updates_same_dm(daily_system):
+    from seulseul.notices.manual import build_manual_event
+    from seulseul.notices.manual_edit import run_interactive
+
+    factory, _, messenger, _, daily_service = daily_system
+    add_student(factory)
+    notices = NoticeService({"CALL"}, repository=SqlAlchemyNoticeRepository(factory))
+    message_ts = f"{int(NOW.timestamp())}.000100"
+    permalink = f"https://workspace.slack.com/archives/CALL/p{message_ts.replace('.', '')}"
+    notices.record_channel_message(
+        build_manual_event("CALL", message_ts, "https://forms.example.test/task", kind="created"),
+        workspace_id=WORKSPACE,
+        source_permalink=permalink,
+        manual_analysis=NoticeAnalysis("원래 제목", "요약", NOW + timedelta(days=1), "내일"),
+    )
+    daily_service.run_due()
+    original_dm = get_daily(factory)[0]
+    item_id = messenger.sent[0][1].items[0].id
+    click(daily_service, original_dm, "complete", item_id)
+    answers = iter(["1", "수정 제목", "", "", "", "y"])
+    assert run_interactive(notices, read=lambda prompt: next(answers)) == 0
+    daily_service.run_due()
+    click(daily_service, original_dm, "completed")
+    with factory() as session:
+        assert session.get(ChecklistModel, item_id).completed_at is not None
+    assert len(messenger.sent) == 1
+    assert messenger.updated[-1][:2] == (original_dm.dm_channel_id, original_dm.message_ts)
+    assert messenger.updated[-1][2].items[0].title == "수정 제목"
+
+
 def test_withdraw_cleanup_does_not_send_replacement(daily_system):
     factory, _, messenger, _, service = daily_system
     student_id = add_student(factory)

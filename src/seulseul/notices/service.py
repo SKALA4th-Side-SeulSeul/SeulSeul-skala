@@ -122,6 +122,7 @@ class NoticeService:
         collection_error: str | None = None,
         collection_retryable: bool = False,
         manual_analysis: NoticeAnalysis | None = None,
+        expected_notice: Notice | None = None,
     ) -> list[Notice]:
         """최신 원본 이벤트만 적용하고 링크별 공지·체크리스트를 함께 동기화한다."""
         parsed = self.parse_event(event, bot_user_id, bot_id)
@@ -134,7 +135,25 @@ class NoticeService:
         links = extract_notice_urls(parsed.text)
         if manual_analysis is not None and len(links) != 1:
             raise ValueError("수동 분석 결과는 링크 하나가 있는 원문에만 적용할 수 있습니다.")
-        if not self._repository.begin_event(workspace_id, parsed):
+        if expected_notice is not None:
+            if (
+                manual_analysis is None
+                or parsed.kind != "changed"
+                or (workspace_id, parsed.channel_id, parsed.message_ts, parsed.text)
+                != (
+                    expected_notice.workspace_id,
+                    expected_notice.channel_id,
+                    expected_notice.message_ts,
+                    expected_notice.text,
+                )
+            ):
+                raise ValueError("대화형 수정은 선택한 원문을 보존해야 합니다.")
+            accepted = self._repository.begin_event(
+                workspace_id, parsed, expected_notice=expected_notice
+            )
+        else:
+            accepted = self._repository.begin_event(workspace_id, parsed)
+        if not accepted:
             return []
         if "\x00" in parsed.text or any(
             len(canonical.encode("utf-8")) > 2048 for _, canonical in links
@@ -208,9 +227,19 @@ class NoticeService:
             self._on_change()
         return changed or []
 
-    def recent_notices(self, limit: int, *, workspace_id: str | None = None) -> list[Notice]:
+    def recent_notices(
+        self,
+        limit: int,
+        *,
+        workspace_id: str | None = None,
+        configured_only: bool = False,
+    ) -> list[Notice]:
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다. 전달된 값: {limit}")
+        if configured_only:
+            return self._repository.recent(
+                limit, workspace_id, channel_ids=self._allowed_channel_ids
+            )
         return self._repository.recent(limit, workspace_id)
 
     def pending_sources(

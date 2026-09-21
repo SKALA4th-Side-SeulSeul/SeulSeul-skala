@@ -45,7 +45,13 @@ class NoticeRepository(Protocol):
 
     def add(self, notice: Notice) -> bool: ...
 
-    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]: ...
+    def recent(
+        self,
+        limit: int,
+        workspace_id: str | None = None,
+        *,
+        channel_ids: Collection[str] | None = None,
+    ) -> list[Notice]: ...
 
     def failed(
         self, limit: int, channel_ids: Collection[str], workspace_id: str | None = None
@@ -65,7 +71,13 @@ class NoticeRepository(Protocol):
         self, workspace_id: str, channel_id: str, message_ts: str
     ) -> list[Notice]: ...
 
-    def begin_event(self, workspace_id: str, event: NoticeMessageEvent) -> bool: ...
+    def begin_event(
+        self,
+        workspace_id: str,
+        event: NoticeMessageEvent,
+        *,
+        expected_notice: Notice | None = None,
+    ) -> bool: ...
 
     def apply_event(
         self, workspace_id: str, event: NoticeMessageEvent, notices: list[Notice]
@@ -135,13 +147,20 @@ class InMemoryNoticeRepository:
             self._canonical_urls.add(identity)
             return True
 
-    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
+    def recent(
+        self,
+        limit: int,
+        workspace_id: str | None = None,
+        *,
+        channel_ids: Collection[str] | None = None,
+    ) -> list[Notice]:
         with self._lock:
             return [
                 notice
                 for notice in self._notices
                 if notice.deleted_at is None
                 and (workspace_id is None or notice.workspace_id == workspace_id)
+                and (channel_ids is None or notice.channel_id in channel_ids)
             ][:limit]
 
     def failed(
@@ -198,10 +217,22 @@ class InMemoryNoticeRepository:
                 n for n in self._notices if _source_key(n) == (workspace_id, channel_id, message_ts)
             ]
 
-    def begin_event(self, workspace_id: str, event: NoticeMessageEvent) -> bool:
+    def begin_event(
+        self,
+        workspace_id: str,
+        event: NoticeMessageEvent,
+        *,
+        expected_notice: Notice | None = None,
+    ) -> bool:
         key = (workspace_id, event.channel_id, event.message_ts)
         with self._lock:
             state = self._sources.get(key)
+            if expected_notice is not None:
+                active = [
+                    n for n in self._notices if _source_key(n) == key and n.deleted_at is None
+                ]
+                if state is None or state[1] or not state[2] or active != [expected_notice]:
+                    return False
             if state is not None:
                 revision, deleted, applied = state
                 if revision > event.revision or (
@@ -323,10 +354,18 @@ class SqlAlchemyNoticeRepository:
             session.commit()
             return inserted_id is not None
 
-    def recent(self, limit: int, workspace_id: str | None = None) -> list[Notice]:
+    def recent(
+        self,
+        limit: int,
+        workspace_id: str | None = None,
+        *,
+        channel_ids: Collection[str] | None = None,
+    ) -> list[Notice]:
         statement = select(NoticeModel).where(NoticeModel.deleted_at.is_(None))
         if workspace_id is not None:
             statement = statement.where(NoticeModel.workspace_id == workspace_id)
+        if channel_ids is not None:
+            statement = statement.where(NoticeModel.channel_id.in_(channel_ids))
         statement = statement.order_by(
             NoticeModel.posted_at.desc(), NoticeModel.created_at.desc()
         ).limit(limit)
@@ -389,9 +428,30 @@ class SqlAlchemyNoticeRepository:
             )
             return [_to_notice(model) for model in models]
 
-    def begin_event(self, workspace_id: str, event: NoticeMessageEvent) -> bool:
+    def begin_event(
+        self,
+        workspace_id: str,
+        event: NoticeMessageEvent,
+        *,
+        expected_notice: Notice | None = None,
+    ) -> bool:
         key = (workspace_id, event.channel_id, event.message_ts)
         with self._session_factory() as session, session.begin():
+            if expected_notice is not None:
+                # 사용자 입력 중에는 잠그지 않고, 저장 직전 원본 잠금 아래 스냅샷을 비교한다.
+                source = session.get(NoticeSourceModel, key, with_for_update=True)
+                if source is None or source.deleted or not source.applied:
+                    return False
+                active = session.scalars(
+                    select(NoticeModel).where(
+                        NoticeModel.workspace_id == workspace_id,
+                        NoticeModel.channel_id == event.channel_id,
+                        NoticeModel.message_ts == event.message_ts,
+                        NoticeModel.deleted_at.is_(None),
+                    )
+                ).all()
+                if [_to_notice(model) for model in active] != [expected_notice]:
+                    return False
             session.execute(
                 insert(NoticeSourceModel)
                 .values(
