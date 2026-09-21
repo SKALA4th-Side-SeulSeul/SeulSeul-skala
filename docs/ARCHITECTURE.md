@@ -20,7 +20,7 @@
   Bolt의 `respond` 콜백은 `slack/client.py`의 `SlackCommandResponder`에서만 호출하며,
   슬래시 명령은 빈 `ack()`만 보내고 `respond()`를 호출하지 않습니다. 명령 오류는 민감정보 없이 로그에 남깁니다. 체크리스트 버튼의 오류·갱신 대기 응답은 `ephemeral`로 전송하고 `replace_original=false`, `delete_original=false`를 명시해 기존 체크리스트를 보존합니다.
 - 업무 규칙은 도메인별 `service.py`가 담당합니다.
-- `notice_edit.sh`는 운영 Compose 경계만 호출하고, `notices/manual_edit.py`가 대화형 입력·확인을 담당합니다. 원문은 DB에서 재사용하고 기존 `NoticeService.record_channel_message`에 수동 분석값과 선택 당시 스냅샷을 전달합니다. 저장소는 원본 잠금 아래 스냅샷 일치·처리 완료·단일 활성 링크를 검사한 뒤 이벤트를 예약하므로 입력 대기 중 트랜잭션을 유지하지 않습니다. 목록의 채널 필터는 조회 한도 전에 적용합니다.
+- `notice.sh`는 운영 Compose 경계만 호출하고, `notices/manual_console.py`가 등록·수정·삭제 메뉴와 입력·확인을 담당합니다. 수정 화면은 `notices/manual_edit.py`를 재사용합니다. 원문은 DB에서 재사용하고 기존 `NoticeService.record_channel_message`에 수동 분석값과 선택 링크·스냅샷을 전달합니다. 저장소는 원본 잠금 아래 스냅샷 일치·처리 완료·선택 링크 존재를 검사한 뒤 이벤트를 예약하므로 입력 대기 중 트랜잭션을 유지하지 않습니다. 목록의 채널 필터는 조회 한도 전에 적용합니다.
 - DB 모델은 도메인별 `model.py`에 두고, 연결은 `database.py`, 도메인별 DB 조작은
   `repository.py`가 관리합니다.
 - 영속 엔터티는 학생·공지·체크리스트·개인 DM 발송 기록으로 분리합니다. AI 처리 상태는 공지에, DM 전송 lease·오류·Slack 주소는 호환성을 유지한 `daily_checklist_messages`에 둡니다. `DailyChecklist*` 내부 이름과 `message_date` 생성일 컬럼은 유지하지만 날짜별 발송은 하지 않습니다(D-025).

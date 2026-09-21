@@ -30,6 +30,7 @@ def operations(tmp_path, monkeypatch):
         "backup.sh",
         "backup_run.sh",
         "backup_stop.sh",
+        "notice.sh",
         "notice_edit.sh",
         "scripts/scheduling.sh",
         "scripts/operations.sh",
@@ -114,6 +115,27 @@ def test_notice_edit_runs_only_interactive_cli_and_forwards_arguments(operations
         "seulseul.main" in call or " up " in call or " stop " in call for call in calls()
     )
     assert "never_print_this" not in result.stdout + result.stderr
+
+
+def test_notice_runs_unified_console_without_starting_another_bot(operations):
+    _, run, calls = operations
+    result = run("notice.sh", "--limit", "50", "--workspace-id", "TTEST")
+    assert result.returncode == 0, result.stderr
+    assert calls()[-1].endswith(
+        "run --rm --no-deps -T bot python -m seulseul.notices.manual_console "
+        "--limit 50 --workspace-id TTEST"
+    )
+    assert not any(
+        "seulseul.main" in call or " up " in call or " stop " in call for call in calls()
+    )
+
+
+def test_notice_help_does_not_require_docker_or_env(operations):
+    repo, run, calls = operations
+    (repo / ".env").unlink()
+    result = run("notice.sh", "--help")
+    assert result.returncode == 0 and "등록" in result.stdout
+    assert calls() == []
 
 
 def test_notice_edit_help_does_not_require_docker_or_env(operations):

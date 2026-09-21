@@ -115,6 +115,8 @@ class ChecklistItem:
     original_url: str
     source_permalink: str
     completed: bool
+    # 같은 Slack 원문에서 나온 링크들을 화면에서 구분하기 위한 내부 식별자.
+    source_ref: str = ""
 
 
 @dataclass(frozen=True)

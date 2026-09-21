@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
-from seulseul.checklists.model import DailyChecklistBoard
+from seulseul.checklists.model import ChecklistItem, DailyChecklistBoard
 
 
 def build_daily_checklist_message(
@@ -25,6 +25,11 @@ def build_daily_checklist_message(
     weekday = "월화수목금토일"[refreshed.weekday()]
     view_hint += f" · 마지막 갱신 {refreshed:%m/%d}({weekday})"
     rows: list[dict[str, Any]] = []
+    source_groups: dict[str, list[ChecklistItem]] = {}
+    for item in board.items:
+        source_ref = item.source_ref or item.source_permalink
+        if source_ref:
+            source_groups.setdefault(source_ref, []).append(item)
 
     def button(label: str, operation: str, item_id: str | None = None) -> dict[str, Any]:
         value = {"daily": str(board.id)}
@@ -51,6 +56,15 @@ def build_daily_checklist_message(
         )
     for item in board.items:
         title = _short_title(item.title)
+        source_ref = item.source_ref or item.source_permalink
+        siblings = source_groups.get(source_ref, [])
+        if len(siblings) > 1:
+            position = siblings.index(item) + 1
+            duplicate_label = f"[{position}/{len(siblings)}] "
+            metadata_label = _link_reference(item.original_url)
+        else:
+            duplicate_label = ""
+            metadata_label = _link_domain(item.original_url)
         link_label = escape(title, quote=False).replace("|", "｜")
         control = button(
             "↶" if item.completed else "✓", "undo" if item.completed else "complete", str(item.id)
@@ -65,14 +79,14 @@ def build_daily_checklist_message(
                     "text": {
                         "type": "mrkdwn",
                         "text": f"{_link_icon(item.original_url)} "
-                        f"*<{_link(item.original_url)}|{link_label}>*",
+                        f"*<{_link(item.original_url)}|{duplicate_label}{link_label}>*",
                     },
                     "accessory": control,
                 },
                 {
                     "type": "context",
                     "elements": [
-                        {"type": "plain_text", "text": _link_domain(item.original_url)},
+                        {"type": "plain_text", "text": metadata_label},
                         {
                             "type": "mrkdwn",
                             "text": f"· {item.deadline_at.astimezone(seoul):%m/%d %H:%M} 마감 · "
@@ -147,6 +161,18 @@ def _link_domain(url: str) -> str:
         return urlsplit(url).hostname or "링크"
     except ValueError:
         return "링크"
+
+
+def _link_reference(url: str) -> str:
+    """같은 원문에서 나온 링크를 짧은 호스트·경로로 구분한다."""
+    try:
+        parsed = urlsplit(url)
+        reference = f"{parsed.hostname or '링크'}{unquote(parsed.path).rstrip('/')}"
+    except ValueError:
+        return "링크"
+    if len(reference) <= 36:
+        return reference
+    return reference[:35].rstrip() + "…"
 
 
 def _link_icon(url: str) -> str:

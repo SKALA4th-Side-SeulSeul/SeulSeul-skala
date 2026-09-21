@@ -231,6 +231,7 @@ class SqlAlchemyChecklistRepository:
                     notice.original_url,
                     notice.source_permalink,
                     checklist.completed_at is not None,
+                    f"{notice.channel_id}:{notice.message_ts}",
                 )
                 for checklist, notice in rows
             ]

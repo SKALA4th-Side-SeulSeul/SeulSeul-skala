@@ -834,7 +834,13 @@ def test_daily_view_links_each_title_to_its_own_submission_and_preserves_url():
         "https://docs.example.test/task-two?answer=%3Cyes%3E&lang=ko",
     )
     items = tuple(
-        replace(board.items[0], id=uuid4(), title=f"과제 {i}", original_url=url)
+        replace(
+            board.items[0],
+            id=uuid4(),
+            title=f"과제 {i}",
+            original_url=url,
+            source_ref=f"C123:{i}",
+        )
         for i, url in enumerate(urls, start=1)
     )
     blocks = build_daily_checklist_message(replace(board, items=items, pending_count=2))["blocks"]
@@ -843,6 +849,34 @@ def test_daily_view_links_each_title_to_its_own_submission_and_preserves_url():
     for block, item in zip(title_blocks, items, strict=True):
         assert f"<{item.original_url.replace('&', '&amp;')}|{item.title}>" in block["text"]["text"]
     assert all("제출 링크" not in str(block) for block in blocks)
+
+
+def test_daily_view_marks_multiple_links_from_one_source_with_position_and_reference():
+    board = daily_board()
+    items = (
+        replace(
+            board.items[0],
+            id=uuid4(),
+            title="같은 설문 제목",
+            original_url="https://forms.gle/first",
+            source_ref="C123:100.100",
+        ),
+        replace(
+            board.items[0],
+            id=uuid4(),
+            title="같은 설문 제목",
+            original_url="https://forms.gle/second",
+            source_ref="C123:100.100",
+        ),
+    )
+    blocks = build_daily_checklist_message(replace(board, items=items, pending_count=2))["blocks"]
+    rows = [block for block in blocks[0]["child_blocks"] if block.get("accessory")]
+
+    assert len(rows) == 2
+    assert all("[1/2]" in rows[0]["text"]["text"] for _ in [0])
+    assert "[2/2]" in rows[1]["text"]["text"]
+    assert "forms.gle/first" in str(rows[0])
+    assert "forms.gle/second" in str(rows[1])
 
 
 def test_empty_daily_view_keeps_empty_state_and_shows_last_updated_in_seoul():

@@ -204,7 +204,7 @@ def test_interactive_concurrent_change_is_not_overwritten(editor_system, capsys)
     assert "변경" in capsys.readouterr().out
 
 
-def test_interactive_multiple_links_are_rejected_without_truncating_source(editor_system):
+def test_interactive_cancel_does_not_truncate_multiple_links(editor_system):
     from seulseul.notices.manual_edit import run_interactive
 
     service, repository, original, analyzer = editor_system
@@ -220,9 +220,42 @@ def test_interactive_multiple_links_are_rejected_without_truncating_source(edito
         source_permalink=SOURCE_URL,
     )
     before = repository.recent(10)
-    answers = iter(["1"])
-    assert run_interactive(service, read=lambda prompt: next(answers)) == 1
+    answers = iter(["1", "q"])
+    assert run_interactive(service, read=lambda prompt: next(answers)) == 0
     assert repository.recent(10) == before
+
+
+def test_interactive_edit_updates_only_selected_link_from_multi_link_source():
+    from seulseul.notices.manual_edit import run_interactive
+
+    repository = InMemoryNoticeRepository(100)
+    analysis = parse_manual_analysis(
+        title="같은 제목",
+        summary="같은 요약",
+        deadline="2026-09-30 23:59",
+        deadline_source_text="9월 30일 23:59",
+    )
+    analyzer = Mock()
+    analyzer.analyze.return_value = analysis
+    service = NoticeService({"C123ABC4567"}, repository=repository, analyzer=analyzer)
+    text = "두 링크 https://forms.example/first 및 https://forms.example/second"
+    service.record_channel_message(
+        build_manual_event("C123ABC4567", MESSAGE_TS, text, kind="created"),
+        workspace_id="T123ABC4567",
+        source_permalink=SOURCE_URL,
+    )
+    answers = iter(["1", "첫 번째만 수정", "", "", "", "y"])
+
+    assert run_interactive(service, read=lambda prompt: next(answers)) == 0
+    notices = sorted(service.recent_notices(10), key=lambda notice: notice.original_url)
+    changed = next(notice for notice in notices if notice.original_url.endswith("second"))
+    unchanged = next(notice for notice in notices if notice.original_url.endswith("first"))
+    assert changed.analysis.title == "첫 번째만 수정"
+    assert unchanged.analysis.title == "같은 제목"
+    assert {notice.original_url for notice in notices} == {
+        "https://forms.example/first",
+        "https://forms.example/second",
+    }
 
 
 def test_interactive_empty_list_needs_no_input(capsys):
