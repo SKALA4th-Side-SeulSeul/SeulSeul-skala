@@ -9,8 +9,9 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from seulseul.checklists.diagnostics import log_event
 from seulseul.checklists.model import (
     ChecklistActionError,
     ChecklistDeliveryError,
@@ -92,11 +93,13 @@ class DailyChecklistService:
                 # 사용자 본문/토큰을 포함할 수 있는 예외 문자열은 로그에 남기지 않는다.
                 logger.error("개인 체크리스트 동기화 오류: type=%s", type(error).__name__)
 
-    def _synchronize(self, recipient: ChecklistRecipient) -> bool:
+    def _synchronize(self, recipient: ChecklistRecipient, daily_id: UUID | None = None) -> bool:
         with self._delivery_lock:
-            return self._synchronize_locked(recipient)
+            return self._synchronize_locked(recipient, daily_id=daily_id)
 
-    def _synchronize_locked(self, recipient: ChecklistRecipient) -> bool:
+    def _synchronize_locked(
+        self, recipient: ChecklistRecipient, *, daily_id: UUID | None = None
+    ) -> bool:
         now = self._clock().astimezone(timezone.utc)
         claim = self._repository.prepare_delivery(
             recipient,
@@ -107,6 +110,7 @@ class DailyChecklistService:
                 for channel, target in self._targets.items()
                 if target == recipient.class_number
             ),
+            daily_id=daily_id,
         )
         if claim is None:
             return False
@@ -133,10 +137,18 @@ class DailyChecklistService:
         message_ts: str,
         operation: str,
         value: str,
+        *,
+        trace_id: str | None = None,
     ) -> bool:
         with self._delivery_lock:
             return self._handle_action_locked(
-                workspace_id, user_id, channel_id, message_ts, operation, value
+                workspace_id,
+                user_id,
+                channel_id,
+                message_ts,
+                operation,
+                value,
+                trace_id=trace_id or uuid4().hex,
             )
 
     def _handle_action_locked(
@@ -147,8 +159,13 @@ class DailyChecklistService:
         message_ts: str,
         operation: str,
         value: str,
+        *,
+        trace_id: str,
     ) -> bool:
         if workspace_id != self._workspace_id:
+            log_event(
+                logger, logging.WARNING, "checklist_action_invalid_workspace", trace_id=trace_id
+            )
             raise ChecklistActionError("이 워크스페이스의 체크리스트가 아닙니다.")
         now = self._clock().astimezone(timezone.utc)
         try:
@@ -156,13 +173,25 @@ class DailyChecklistService:
             daily_id = UUID(payload["daily"])
             item_id = UUID(payload["item"]) if operation in {"complete", "undo"} else None
         except (ValueError, TypeError, KeyError, AttributeError) as error:
+            log_event(logger, logging.WARNING, "checklist_action_invalid_value", trace_id=trace_id)
             raise ChecklistActionError("버튼 정보를 확인할 수 없습니다.") from error
+        log_event(
+            logger,
+            logging.INFO,
+            "checklist_action_parsed",
+            trace_id=trace_id,
+            daily_id=str(daily_id),
+            item_id=str(item_id) if item_id else None,
+        )
         recipient = self._repository.recipient(workspace_id, user_id)
         if recipient is None:
+            log_event(
+                logger, logging.WARNING, "checklist_action_student_not_found", trace_id=trace_id
+            )
             raise ChecklistActionError(
                 "현재 가입되어 있지 않습니다. /seulseul 시작으로 가입해 주세요."
             )
-        self._repository.apply_action(
+        effective_daily_id = self._repository.apply_action(
             recipient,
             self._channels(recipient),
             daily_id,
@@ -171,6 +200,17 @@ class DailyChecklistService:
             operation,
             item_id,
             now,
+            trace_id=trace_id,
         )
         self._notify()
-        return self._synchronize(recipient)
+        updated = self._synchronize(recipient, daily_id=effective_daily_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "checklist_action_result",
+            trace_id=trace_id,
+            daily_id=str(effective_daily_id),
+            saved=True,
+            dm_synchronized=updated,
+        )
+        return updated

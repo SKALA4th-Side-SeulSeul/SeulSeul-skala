@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 from uuid import uuid4
 
 import pytest
@@ -1113,8 +1113,9 @@ def test_checklist_handler_acknowledges_before_delegating():
     calls = []
     service = Mock()
 
-    def handle(*args):
+    def handle(*args, trace_id):
         assert calls == ["ack"]
+        assert len(trace_id) == 32
         calls.append("service")
         return True
 
@@ -1131,6 +1132,7 @@ def test_checklist_handler_acknowledges_before_delegating():
         "123.456",
         "complete",
         "{}",
+        trace_id=ANY,
     )
 
 
@@ -1152,3 +1154,56 @@ def test_checklist_handler_reports_errors_only_through_responder(error):
 def test_checklist_action_listener_registers_without_live_api():
     app = App(token="xoxb-test-token", token_verification_enabled=False)
     register_checklist_handlers(app, Mock())
+
+
+def test_button_logs_share_trace_and_exclude_payload_and_exception_details(caplog):
+    service = Mock()
+    service.handle_action.side_effect = RuntimeError("secret-db-password")
+    body = action_body()
+    body["response_url"] = "https://hooks.example.test/secret-response-url"
+    body["token"] = "secret-token"
+    body["message"] = {"text": "private-notice-body"}
+    body["actions"][0]["value"] = "private-button-value"
+    caplog.set_level(logging.INFO)
+    handler = create_checklist_action_handler(service)
+    for _ in range(2):
+        handler(RecordingAck(), RecordingAck(), body, logging.getLogger("test"))
+
+    logs = [json.loads(record.getMessage()) for record in caplog.records]
+    assert [entry["event"] for entry in logs] == [
+        "checklist_action_received",
+        "checklist_action_error",
+        "checklist_action_received",
+        "checklist_action_error",
+    ]
+    assert logs[0]["trace_id"] == logs[1]["trace_id"]
+    assert logs[2]["trace_id"] == logs[3]["trace_id"]
+    assert logs[0]["trace_id"] != logs[2]["trace_id"]
+    assert len({entry["instance_id"] for entry in logs}) == 1
+    assert logs[1]["error_type"] == "RuntimeError"
+    assert logs[0]["operation"] == "complete"
+    assert logs[0]["message_ts"] == "123.456"
+    for hidden in (
+        "secret-db-password",
+        "secret-response-url",
+        "secret-token",
+        "private-notice-body",
+        "private-button-value",
+        USER_ID,
+        WORKSPACE_ID,
+        "DTEST",
+    ):
+        assert hidden not in caplog.text
+
+
+def test_malformed_button_logs_rejection_without_echoing_arbitrary_fields(caplog):
+    caplog.set_level(logging.INFO)
+    service = Mock()
+    create_checklist_action_handler(service)(
+        RecordingAck(), RecordingAck(), {"token": "secret-token"}, logging.getLogger("test")
+    )
+    entry = json.loads(caplog.records[-1].getMessage())
+    assert entry["event"] == "checklist_action_invalid_body"
+    assert entry["trace_id"]
+    assert "secret-token" not in caplog.text
+    service.handle_action.assert_not_called()
