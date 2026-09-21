@@ -913,6 +913,27 @@ def test_original_buttons_work_after_midnight_and_preserve_completion_next_day(d
     assert len(messenger.sent) == 1 and len(get_daily(factory)) == 1
 
 
+def test_button_accepts_equivalent_slack_message_timestamp_precision(daily_system):
+    factory, _, messenger, _, service = daily_system
+    add_student(factory)
+    add_notice(factory)
+    service.run_due()
+    daily = get_daily(factory)[0]
+    item_id = messenger.sent[0][1].items[0].id
+
+    service.handle_action(
+        WORKSPACE,
+        "UONE",
+        daily.dm_channel_id,
+        f"{float(daily.message_ts):.6f}",
+        "complete",
+        json.dumps({"daily": str(daily.id), "item": str(item_id)}),
+    )
+
+    with factory() as session:
+        assert session.get(ChecklistModel, item_id).completed_at is not None
+
+
 def test_legacy_daily_records_reuse_first_sent_message_and_reject_other_buttons(daily_system):
     factory, _, messenger, _, service = daily_system
     student_id = add_student(factory)
