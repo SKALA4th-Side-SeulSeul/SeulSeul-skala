@@ -270,4 +270,6 @@ class SlackChecklistClient:
         return channel_id, ts
 
     def update(self, channel_id: str, message_ts: str, board: DailyChecklistBoard) -> None:
+        if not isinstance(channel_id, str) or not channel_id.startswith("D"):
+            raise ChecklistDeliveryError("invalid_dm_response")
         self._deliver("chat_update", board, channel=channel_id, ts=message_ts)

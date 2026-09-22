@@ -47,11 +47,14 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | `./stop.sh ngrok` | ngrok만 중지, 봇·OAuth·DB 유지 |
 | `./stop.sh postgres` | DB 중지 전 의존하는 봇도 중지 |
 | `./view.sh` | 전체 컨테이너 상태 (`ps -a`) |
-| `./view.sh logs` | 봇 최근 100줄 및 실시간 로그 |
-| `./view.sh logs postgres` | PostgreSQL 로그 |
-| `./view.sh logs oauth` | OAuth HTTP 서버 로그 |
-| `./view.sh logs ngrok` | ngrok 터널 로그 |
-| `./view.sh logs all` | 봇·OAuth·ngrok·DB 로그 함께 보기 |
+| `./view.sh logs` | 봇 최근 100줄을 사람이 읽기 좋게 출력하고 종료 |
+| `./view.sh logs bot --follow` | 봇 최근 100줄 출력 후 실시간 로그 추적 |
+| `./view.sh logs postgres` | PostgreSQL 최근 로그 조회 |
+| `./view.sh logs oauth` | OAuth HTTP 서버 최근 로그 조회 |
+| `./view.sh logs ngrok` | ngrok 터널 최근 로그 조회 |
+| `./view.sh logs all --follow` | 봇·OAuth·ngrok·DB 로그를 함께 실시간 추적 |
+| `./view.sh logs bot --tail 300` | 봇 과거 로그 300줄 조회 |
+| `./view.sh logs bot --raw` | 봇 원본 로그 조회 |
 | `./view.sh db` | 기본 읽기 전용 psql 접속. 종료는 `\q` |
 | `./view.sh schema` | DB 테이블 목록 |
 | `./view.sh config` | 환경변수 값을 출력하지 않고 Compose 구성 검증 |
@@ -60,7 +63,7 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | `./backup_run.sh` | 매일 한국 시간 03:00 자동 백업 등록·재등록 (systemd 사용자 타이머) |
 | `./backup_stop.sh` | 자동 백업 예약 해제. 실행 중인 백업·기존 백업·DB 유지 |
 
-각 스크립트의 `--help`로 사용법을 확인할 수 있습니다. 스크립트 위치를 기준으로 실행하므로 다른 작업 디렉터리에서 절대 경로로 실행해도 같은 프로젝트를 사용합니다.
+`view.sh logs`는 기본적으로 최근 로그를 `[INFO]`·`[WARN]`·`[ERROR]`로 구분해 출력하고 종료합니다. 애플리케이션의 `checklist_*` 진단 JSON은 이벤트·결과·원인·trace만 한 줄로 요약합니다. 계속 지켜보려면 `--follow`를 붙이고, 더 오래된 기록은 `--tail N`으로 조회하세요. 원문 형식이 필요할 때는 `--raw`를 사용합니다. 각 스크립트의 `--help`로 사용법을 확인할 수 있습니다. 스크립트 위치를 기준으로 실행하므로 다른 작업 디렉터리에서 절대 경로로 실행해도 같은 프로젝트를 사용합니다.
 
 ### 운영 DB 백업
 
@@ -84,11 +87,11 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 - 덤프에는 학생 개인정보와 공지 내용이 포함될 수 있습니다. Git·채팅에 올리지 말고 서버 밖의 접근 제한된 저장소에도 별도 복사하세요. 주기 실행은 위 타이머로 등록하며 보존 기간 정리·외부 저장소 업로드는 아직 자동화하지 않았습니다.
 - 마이그레이션 전에는 `./backup.sh`가 성공한 것을 확인하고 `./run.sh`를 실행합니다. `run.sh`가 백업을 자동 실행하는 것은 아닙니다.
 
-- 최초 준비: `./run.sh setup` → `nano .env` → `./view.sh config` → `./run.sh` → `./view.sh logs`.
+- 최초 준비: `./run.sh setup` → `nano .env` → `./view.sh config` → `./run.sh` → `./view.sh logs --follow`.
 - 코드 업데이트: 커밋·푸시된 코드를 서버에서 `git pull --ff-only origin main`으로 받은 뒤 `./run.sh` 실행. 자동 pull은 하지 않습니다. 운영 데이터가 있으면 먼저 백업하세요.
 - `.env` 수정도 `./run.sh`로 재생성해야 반영됩니다. 템플릿 생성만으로는 실행할 수 없으며 API 키는 `NVIDIA_API_KEY`, 대기 시간은 `AI_TIMEOUT_SECONDS=45`에 입력합니다. 비밀번호 변경은 기존 DB 계정에 자동 반영되지 않습니다.
 - `run.sh`/`stop.sh`를 동시에 실행하지 마세요. 동일 Slack 앱의 로컬 봇은 먼저 종료합니다. 마이그레이션 실패 시 운영 봇은 중지 상태로 남으므로 원인 해결 후 다시 `./run.sh`를 실행하세요.
-- 로그 보기에서 `Ctrl+C`는 봇을 중지하지 않습니다. 컨테이너 시작은 Slack 연결 성공을 보장하지 않으므로 로그 확인이 필요합니다. 로그에는 기존 오류로 노출된 키·개인정보가 있을 수 있어 공유 전 가려야 합니다.
+- `./view.sh logs`는 과거 로그만 출력하고, `./view.sh logs --follow`는 최근 로그를 먼저 보여준 뒤 실시간 추적을 시작합니다. `--tail N`으로 과거 범위를 늘릴 수 있으며, `Ctrl+C`는 실시간 로그 보기만 종료합니다. 컨테이너 시작은 Slack 연결 성공을 보장하지 않으므로 로그 확인이 필요합니다. 로그에는 기존 오류로 노출된 키·개인정보가 있을 수 있어 공유 전 가려야 합니다.
 - `view.sh db`는 기본 읽기 전용 옵션이지 권한이 제한된 별도 DB 계정은 아닙니다. 임의로 쓰기 설정을 해제하지 마세요. DB 포트는 외부에 공개하지 않습니다.
 - 스크립트는 운영 서버에서 직접 검증해야 합니다. 자동 테스트는 가짜 Docker로 명령 순서·실패 시 중단·데이터 보존을 검증하며 실제 컨테이너를 조작하지 않습니다.
 

@@ -180,7 +180,7 @@ PostgreSQL과 Docker Compose의 환경별 작업·운영 기록입니다. 현재
 - [ ] 운영 서버에서 자동 백업 등록 후 실제 성공 로그·파일 확인
 - [ ] VM 밖(예: Oracle Object Storage) 보관 및 보존 기간 정책 확정·적용 (현재 자동 삭제 없음)
 - [ ] 백업 복구 시험 1회
-- [x] 로그 확인 방법 정리: README의 `./view.sh logs`, 백업 journal 확인
+- [x] 로그 확인 방법 정리: README의 `./view.sh logs`·`--follow`, 백업 journal 확인
 - [x] 실제 워크스페이스의 주요 학생 흐름 점검 (사용자 확인, 참여 인원·세부 실행 증거는 별도 기록)
 
 ### 2-6. 업그레이드 후 남은 정리
