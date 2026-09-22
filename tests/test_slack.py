@@ -1092,6 +1092,17 @@ def test_daily_client_posts_regular_dm_and_updates_by_saved_address() -> None:
     client.chat_postEphemeral.assert_not_called()
 
 
+@pytest.mark.parametrize("channel_id", ["CCHANNEL", "GPRIVATE"])
+def test_daily_client_refuses_to_update_non_dm_channel(channel_id: str) -> None:
+    client = Mock()
+
+    with pytest.raises(ChecklistDeliveryError) as caught:
+        SlackChecklistClient(client).update(channel_id, "123.456", daily_board())
+
+    assert caught.value.code == "invalid_dm_response"
+    client.chat_update.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("stage", "uncertain"), [("conversations_open", False), ("chat_postMessage", True)]
 )

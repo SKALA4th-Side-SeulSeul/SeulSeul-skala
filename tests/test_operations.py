@@ -65,6 +65,9 @@ fi
 if [[ "$*" == *'pg_restore --file=/dev/null'* ]]; then
     cat >/dev/null
 fi
+if [[ -f emit-logs && "$*" == *' logs '* ]]; then
+    cat emit-logs
+fi
 """
     )
     docker.chmod(0o700)
@@ -245,7 +248,60 @@ def test_view_accepts_ngrok_logs(operations):
     _, run, calls = operations
     result = run("view.sh", "logs", "ngrok")
     assert result.returncode == 0
-    assert calls()[-1].endswith("logs --tail 100 -f ngrok")
+    assert calls()[-1].endswith("logs --no-color --tail 100 ngrok")
+
+
+def test_view_formats_log_levels_and_diagnostic_events(operations):
+    repo, run, _ = operations
+    (repo / "emit-logs").write_text(
+        "\n".join(
+            [
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 04:28:04,663 INFO seulseul.main: "
+                    "Socket Mode로 Slack에 연결합니다."
+                ),
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 04:28:05,000 WARNING seulseul.checklists: "
+                    "개인 DM 갱신 실패"
+                ),
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 04:28:06,000 ERROR seulseul.checklists: "
+                    '{"diagnostic_version":1,"event":"checklist_action_error",'
+                    '"trace_id":"trace-1234","operation":"refresh",'
+                    '"reason":"invalid_delivery"}'
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    result = run("view.sh", "logs", "bot")
+
+    assert result.returncode == 0, result.stderr
+    assert "[INFO]" in result.stdout
+    assert "[WARN]" in result.stdout
+    assert "[ERROR]" in result.stdout
+    assert "checklist_action_error" in result.stdout
+    assert "operation=refresh" in result.stdout
+    assert "reason=invalid_delivery" in result.stdout
+    assert "trace=trace-1234" in result.stdout
+    assert "Ctrl+C" not in result.stdout
+
+    follow_result = run("view.sh", "logs", "bot", "--follow")
+
+    assert follow_result.returncode == 0, follow_result.stderr
+    assert "최근 로그 + 실시간 추적" in follow_result.stdout
+    assert "Ctrl+C" in follow_result.stdout
+
+    raw_result = run("view.sh", "logs", "bot", "--raw")
+
+    assert raw_result.returncode == 0, raw_result.stderr
+    assert "Docker 원본 로그" in raw_result.stdout
+    assert "bot-1  | 2026-09-22 04:28:04,663 INFO" in raw_result.stdout
+    assert "[INFO]" not in raw_result.stdout
 
 
 def test_missing_env_and_nonrootless_docker_fail_before_mutation(operations):
