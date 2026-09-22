@@ -4,8 +4,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/operations.sh"
 
 usage() {
     cat <<'USAGE'
-사용법: ./view.sh [status|logs [서비스] [옵션]|db|schema|config|--help]
-  status(기본): 컨테이너 상태 / logs: 최근 로그 조회
+사용법: ./view.sh [status|dashboard [--watch]|logs [서비스] [옵션]|db|schema|config|--help]
+  status(기본): 컨테이너 상태 / dashboard: 공지 처리 현황·수동 조치 목록
+  dashboard 옵션: --watch(-w) 5초마다 갱신
+  logs: 최근 로그 조회
   서비스: bot(기본), oauth, ngrok, postgres, all
   logs 옵션: --follow(-f) 실시간 추적, --tail N 최근 N줄, --raw 원본 출력
   db: 읽기 전용 psql 접속 (종료: \q) / schema: 테이블 목록
@@ -25,6 +27,7 @@ log_service="bot"
 log_tail=100
 log_follow=false
 log_raw=false
+dashboard_watch=false
 
 case "$operation" in
     --help|-h)
@@ -34,6 +37,21 @@ case "$operation" in
         ;;
     status|db|schema|config)
         [[ $# -eq 1 ]] || fail_usage
+        ;;
+    dashboard)
+        shift
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --watch|-w)
+                    [[ "$dashboard_watch" == false ]] || fail_usage
+                    dashboard_watch=true
+                    shift
+                    ;;
+                *)
+                    fail_usage
+                    ;;
+            esac
+        done
         ;;
     logs)
         shift
@@ -411,6 +429,20 @@ format_logs() {
 }
 
 case "$operation" in
+    dashboard)
+        if [[ "$dashboard_watch" == true ]]; then
+            trap 'printf "\n대시보드 새로고침을 종료합니다.\n"; exit 130' INT TERM
+            while true; do
+                if [[ -t 1 ]]; then
+                    printf '\033[2J\033[H'
+                fi
+                compose run --rm --no-deps -T bot python -m seulseul.notices.dashboard
+                printf '\n5초 후 새로고침 · 종료: Ctrl+C\n'
+                sleep 5
+            done
+        fi
+        compose run --rm --no-deps -T bot python -m seulseul.notices.dashboard
+        ;;
     status)
         compose ps -a
         ;;

@@ -34,6 +34,8 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 
 서버의 `seulseul` 계정으로 직접 로그인한 뒤 `~/app`에서 실행합니다. 아래 스크립트는 **운영 전용**이며 항상 `compose.prod.yaml`을 사용합니다. Rootless Docker 연결을 확인하며 Docker 설치·방화벽 변경·DB 외부 포트 공개는 하지 않습니다. 로컬 개발 봇 실행에는 사용하지 마세요.
 
+운영자가 바로 찾을 명령만 모은 [운영자 명령 빠른 안내](docs/OPERATIONS.md)를 함께 제공합니다.
+
 | 명령 | 동작 |
 | --- | --- |
 | `./run.sh setup` | `.env`가 없을 때만 권한 600으로 템플릿 생성. 기존 설정은 보존 |
@@ -47,6 +49,9 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | `./stop.sh ngrok` | ngrok만 중지, 봇·OAuth·DB 유지 |
 | `./stop.sh postgres` | DB 중지 전 의존하는 봇도 중지 |
 | `./view.sh` | 전체 컨테이너 상태 (`ps -a`) |
+| `./view.sh dashboard` | 공지 처리 현황·자동 재시도·수동 조치 목록 |
+| `./view.sh dashboard --watch` | 대시보드를 5초마다 갱신 |
+| `./admin.sh` | 대시보드와 번호 선택형 관리자 메뉴 |
 | `./view.sh logs` | 봇 최근 100줄을 사람이 읽기 좋게 출력하고 종료 |
 | `./view.sh logs bot --follow` | 봇 최근 100줄 출력 후 실시간 로그 추적 |
 | `./view.sh logs postgres` | PostgreSQL 최근 로그 조회 |
@@ -59,6 +64,9 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | `./view.sh schema` | DB 테이블 목록 |
 | `./view.sh config` | 환경변수 값을 출력하지 않고 Compose 구성 검증 |
 | `./notice.sh` | 운영 공지 등록·수정·삭제 대화형 메뉴 |
+| `./retry.sh list` | AI 실패 공지와 번호 목록 조회 |
+| `./retry.sh retry --index N --limit 100` | 번호로 실패 공지 AI 재처리 |
+| `./retry.sh pending --limit 100` | 미적용 Slack 원본 조회 |
 | `./backup.sh` | 운영 DB custom-format 백업·아카이브 해독 검사·SHA-256 생성. 기존 백업 보존 |
 | `./backup_run.sh` | 매일 한국 시간 03:00 자동 백업 등록·재등록 (systemd 사용자 타이머) |
 | `./backup_stop.sh` | 자동 백업 예약 해제. 실행 중인 백업·기존 백업·DB 유지 |
@@ -226,10 +234,13 @@ ngrok 터널은 `restart: unless-stopped`로 장애 시 자동 재시작됩니�
 운영 Docker 환경에서는 프로젝트 루트의 `./retry.sh`로 실패 공지를 조회·재처리할 수 있습니다. 인자 없이 실행하면 목록만 조회하며, `retry`를 명시해야 AI를 호출합니다. 이 스크립트는 두 번째 봇을 시작하지 않고 일회성 운영 컨테이너에서 CLI를 실행합니다.
 
 ```bash
-./retry.sh list
-./retry.sh pending
+./retry.sh list --limit 100
+./retry.sh retry --index 1 --limit 100
+./retry.sh pending --limit 100
 ./retry.sh retry --workspace-id '<워크스페이스 ID>' --url '<제출 링크>' --channel-id '<채널 ID>' --message-ts '<메시지 ts>'
 ```
+
+`list` 또는 `dashboard`의 번호를 `retry --index`에 그대로 넣습니다. `retry.sh`는 AI를 다시 호출하며, AI 결과를 직접 입력하려면 `./notice.sh`의 수동 수정 흐름을 사용합니다.
 
 직접 Docker Compose 명령을 사용해야 한다면 다음과 같이 실행합니다.
 
