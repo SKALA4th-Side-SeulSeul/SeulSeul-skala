@@ -168,6 +168,10 @@ class SlackChecklistClient:
             else "현재 SeulSeul에 가입되어 있지 않습니다.",
         )
 
+    def send_announcement(self, user_id: str, text: str) -> None:
+        """운영 안내를 별도 DM으로 보낸다. 재시도나 기존 DM 편집은 하지 않는다."""
+        self._send_plain_dm(user_id, text)
+
     def send_enrollment_guidance(self, user_id: str, guidance: str) -> None:
         """성명 불일치 안내만 일반 DM으로 보낸다. 기존 메시지는 정리하지 않는다."""
         self._send_plain_dm(user_id, guidance)
