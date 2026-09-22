@@ -38,18 +38,20 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | --- | --- |
 | `./run.sh setup` | `.env`가 없을 때만 권한 600으로 템플릿 생성. 기존 설정은 보존 |
 | `nano .env` | 운영 환경변수 직접 편집. `APP_ENV=production`, `AI_PROVIDER=nvidia`, DB 주소 `postgres:5432` |
-| `./run.sh` | 이미지 빌드 → 기존 봇·OAuth 서버 중지 → DB healthy 대기 → 마이그레이션 → 재생성 |
+| `./run.sh` | 이미지 빌드 → 기존 봇·OAuth·ngrok 중지 → DB healthy 대기 → 마이그레이션 → 재생성 |
 | `./run.sh postgres` | PostgreSQL만 실행·healthy 대기 |
-| `./run.sh migrate` | 빌드·봇·OAuth 중지·DB 준비·마이그레이션. 서비스는 중지 상태 유지 |
-| `./stop.sh` | 봇과 DB 순서대로 중지, 컨테이너·데이터 볼륨 보존 |
+| `./run.sh migrate` | 빌드·봇·OAuth·ngrok 중지·DB 준비·마이그레이션. 서비스는 중지 상태 유지 |
+| `./stop.sh` | 봇·OAuth·ngrok과 DB를 순서대로 중지, 컨테이너·데이터 볼륨 보존 |
 | `./stop.sh bot` | 봇만 중지, DB 유지 |
-| `./stop.sh oauth` | OAuth HTTP 서버만 중지, 봇·DB 유지 |
+| `./stop.sh oauth` | OAuth HTTP 서버와 ngrok만 중지, 봇·DB 유지 |
+| `./stop.sh ngrok` | ngrok만 중지, 봇·OAuth·DB 유지 |
 | `./stop.sh postgres` | DB 중지 전 의존하는 봇도 중지 |
 | `./view.sh` | 전체 컨테이너 상태 (`ps -a`) |
 | `./view.sh logs` | 봇 최근 100줄 및 실시간 로그 |
 | `./view.sh logs postgres` | PostgreSQL 로그 |
 | `./view.sh logs oauth` | OAuth HTTP 서버 로그 |
-| `./view.sh logs all` | 봇·OAuth·DB 로그 함께 보기 |
+| `./view.sh logs ngrok` | ngrok 터널 로그 |
+| `./view.sh logs all` | 봇·OAuth·ngrok·DB 로그 함께 보기 |
 | `./view.sh db` | 기본 읽기 전용 psql 접속. 종료는 `\q` |
 | `./view.sh schema` | DB 테이블 목록 |
 | `./view.sh config` | 환경변수 값을 출력하지 않고 Compose 구성 검증 |
@@ -92,8 +94,10 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 
 ### 외부 워크스페이스 설치(OAuth)
 
-외부 워크스페이스 설치는 `oauth` 컨테이너가 담당합니다. `bot` 컨테이너의 Socket Mode와 별도로
-`127.0.0.1:8080`에만 바인딩되며, 호스트의 고정 ngrok 터널이 이 포트로 연결됩니다.
+외부 워크스페이스 설치는 `oauth` 컨테이너가 담당하고, `ngrok` 컨테이너가 고정 HTTPS 주소를 연결합니다.
+두 서비스 모두 `./run.sh`로 시작하고 `./stop.sh`로 중지합니다. ngrok은 같은 Compose 네트워크의
+`oauth:8080`으로 연결하므로 호스트의 OAuth 포트(`SLACK_OAUTH_PORT`)를 다시 외부에 공개하지 않습니다.
+호스트에서 이미 8080을 사용하는 서비스가 있으면 `SLACK_OAUTH_PORT=18080`처럼 루프백 포트만 바꿉니다.
 
 서버 `.env`에 Slack 앱 `Basic Information → App Credentials`의 값을 입력합니다.
 
@@ -102,16 +106,22 @@ SLACK_CLIENT_ID=
 SLACK_CLIENT_SECRET=
 SLACK_SIGNING_SECRET=
 SLACK_REDIRECT_URI=https://고정-ngrok-주소.ngrok-free.dev/slack/oauth/callback
+NGROK_AUTHTOKEN=
+NGROK_DOMAIN=고정-ngrok-주소.ngrok-free.dev
 ```
 
 Slack 앱 `OAuth & Permissions → Redirect URLs`에도 `SLACK_REDIRECT_URI`와 같은 주소를 등록합니다.
-`./run.sh` 후 아래 주소를 브라우저에서 열면 OAuth 설치를 시작합니다.
+`NGROK_AUTHTOKEN`은 ngrok 계정에서 발급한 토큰이며 `.env`에만 저장합니다. `NGROK_DOMAIN`은
+`https://`를 제외한 고정 도메인만 입력합니다. `./run.sh` 후 `./view.sh status`에서 `bot`, `oauth`,
+`ngrok`이 모두 `Up`인지 확인하고 아래 주소를 브라우저에서 열면 OAuth 설치를 시작합니다.
 
 ```text
 https://고정-ngrok-주소.ngrok-free.dev/slack/install
 ```
 
 설치·state 정보는 `oauth_data` Docker 볼륨에 저장되며, OAuth callback query string은 access log에 남기지 않습니다.
+ngrok 터널은 `restart: unless-stopped`로 장애 시 자동 재시작됩니다. Rootless Docker 자체가 로그아웃·재부팅
+후에도 실행되려면 `seulseul` 계정의 lingering 설정이 필요합니다.
 실제 설치 결과 토큰을 사용해 외부 워크스페이스의 공지·DM을 처리하려면 워크스페이스별 Slack authorization을
 봇 업무 서비스에 연결하는 후속 작업도 필요합니다. 현재 기존 Socket Mode 업무 흐름은 기존
 `SLACK_BOT_TOKEN` 워크스페이스를 계속 사용합니다.
