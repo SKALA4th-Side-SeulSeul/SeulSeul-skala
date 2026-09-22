@@ -11,7 +11,8 @@ DATE = re.compile(
     r"(?<!\d)(?:(?P<year>\d{4})\s*(?:년\s*|[-/.]))?"
     r"(?P<month>\d{1,2})\s*(?:월\s*|[-/.])(?P<day>\d{1,2})(?:\s*일)?(?!\d)"
 )
-RELATIVE = re.compile(r"오늘|내일|모레|(?:이번|다음)\s*주\s*[월화수목금토일]요일")
+RELATIVE = re.compile(r"오늘|금일|내일|모레|(?:이번|다음)\s*주\s*[월화수목금토일]요일")
+RELATIVE_DAY_OFFSETS = {"오늘": 0, "금일": 0, "내일": 1, "모레": 2}
 CLOCK = re.compile(
     r"(?<!\d)(?:(?P<period>오전|오후)\s*)?(?P<hour>\d{1,2})"
     r"(?:\s*:\s*(?P<minute>\d{2})(?::(?P<second>\d{2}))?"
@@ -20,7 +21,7 @@ CLOCK = re.compile(
 
 
 def expected_deadline(evidence: str, posted_at: datetime) -> datetime:
-    """명시 날짜/오늘·내일·모레/이번·다음 주 요일, 24시간·오전/오후 시각 지원."""
+    """명시 날짜/오늘·금일·내일·모레/이번·다음 주 요일과 시각을 검증한다."""
     posted = posted_at.astimezone(SEOUL)
     days: set[date] = set()
     try:
@@ -30,8 +31,8 @@ def expected_deadline(evidence: str, posted_at: datetime) -> datetime:
             )
         for match in RELATIVE.finditer(evidence):
             phrase = re.sub(r"\s", "", match[0])
-            if phrase in {"오늘", "내일", "모레"}:
-                days.add(posted.date() + timedelta(days={"오늘": 0, "내일": 1, "모레": 2}[phrase]))
+            if phrase in RELATIVE_DAY_OFFSETS:
+                days.add(posted.date() + timedelta(days=RELATIVE_DAY_OFFSETS[phrase]))
             else:
                 offset = "월화수목금토일".index(phrase[-3]) - posted.weekday()
                 days.add(

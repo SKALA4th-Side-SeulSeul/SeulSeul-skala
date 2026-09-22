@@ -379,6 +379,43 @@ def test_date_only_quote_cannot_hide_explicit_time_on_same_line():
         parse_notice_analysis(analysis_json(), "마감: 9월 20일까지 18:00 제출", POSTED_AT)
 
 
+@pytest.mark.parametrize("evidence", ["금일 13:10까지", "오늘 13:10까지", "9월 22일 13:10까지"])
+def test_geumil_deadline_with_separate_presentation_time(evidence):
+    source = (
+        "실습 결과 리포트를 제출하세요.\n"
+        "• 제출 마감: 금일 13:10까지\n"
+        "• 제출 링크: https://forms.example.test/report\n"
+        "전원 제출 완료\n발표 시작: 13:30\n발표 시간: 개별 5 ~ 10분"
+    )
+    # UTC 게시 시각도 한국 날짜로 환산한다. 재처리 시각은 사용하지 않는다.
+    posted = datetime.fromisoformat("2026-09-22T00:40:36+00:00")
+    result = parse_notice_analysis(
+        analysis_json(deadline_source_text=evidence, deadline_at="2026-09-22T13:10:00+09:00"),
+        source,
+        posted,
+    )
+    assert result.deadline_at.isoformat() == "2026-09-22T13:10:00+09:00"
+
+
+@pytest.mark.parametrize("deadline", ["2026-09-14T13:30:00+09:00", "2026-09-15T13:10:00+09:00"])
+def test_geumil_rejects_wrong_time_or_day(deadline):
+    with pytest.raises(AiClientError):
+        parse_notice_analysis(
+            analysis_json(deadline_source_text="금일 13:10까지", deadline_at=deadline),
+            "제출 마감: 금일 13:10까지\n발표 시작: 13:30",
+            POSTED_AT,
+        )
+
+
+def test_geumil_without_time_defaults_to_end_of_korean_posting_day():
+    result = parse_notice_analysis(
+        analysis_json(deadline_source_text="금일까지", deadline_at="2026-09-15T23:59:00+09:00"),
+        "금일까지 제출",
+        datetime.fromisoformat("2026-09-14T16:00:00+00:00"),
+    )
+    assert result.deadline_at.isoformat() == "2026-09-15T23:59:00+09:00"
+
+
 def test_date_quote_cannot_hide_time_on_another_line():
     text = "9월 20일까지\n마감 시간: 오후 6시"
     with pytest.raises(AiClientError, match="함께 인용"):
