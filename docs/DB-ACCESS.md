@@ -2,7 +2,7 @@
 
 ## 현재 접속 상태와 먼저 확인할 것
 
-사용자는 서버 DB 포트를 15432로 변경하고 기존 비밀번호 SSH 터널을 사용하는 안내 후 DBeaver 접속 성공을 확인했습니다. 다만 실제 SSH 계정·적용된 Match 규칙·조회 전용 DB 계정 사용 여부는 직접 검증하지 않았습니다. 저장소 `compose.prod.yaml`은 여전히 `127.0.0.1:5432:5432`입니다. 이 문서 변경만으로 서버나 Compose 설정을 변경하지 않습니다.
+운영 PostgreSQL은 서버의 `127.0.0.1:15432`에만 바인딩하며 컨테이너 내부 포트는 `5432`입니다. DBeaver는 SSH 터널로 이 루프백 포트에 접속합니다. 실제 SSH 계정·적용된 Match 규칙·조회 전용 DB 계정 사용 여부는 별도 확인합니다.
 
 운영 서버에서 먼저 읽기 전용 확인을 합니다.
 
@@ -13,13 +13,13 @@ git diff -- compose.prod.yaml
 docker compose -f compose.prod.yaml port postgres 5432
 ```
 
-현재 접속을 유지하려면 출력 포트를 DBeaver **Main**의 `127.0.0.1` Port에 사용하고 **SSH**에는 실제 서버 주소·SSH 포트·기존에 성공한 인증을 유지합니다. 봇의 DB 주소는 `postgres:5432`입니다. 포트 출력에 외부 주소 `0.0.0.0` 또는 `[::]`가 보이면 접속을 확대하지 말고 노출 설정부터 점검합니다. 방화벽에 DB 포트를 열지 않습니다.
+`docker compose port postgres 5432`의 출력이 `127.0.0.1:15432`인지 확인합니다. DBeaver **Main**은 `127.0.0.1:15432`, **SSH**에는 실제 서버 주소·SSH 포트·기존에 성공한 인증을 사용합니다. 봇의 DB 주소와 컨테이너 내부 포트는 `postgres:5432`로 유지합니다. 포트 출력에 외부 주소 `0.0.0.0` 또는 `[::]`가 보이면 접속을 확대하지 말고 노출 설정부터 점검합니다. 방화벽에 DB 포트를 열지 않습니다.
 
-서버 Compose에 15432 변경이 남아 있다면 재배포 전에 차이를 검토합니다. 무조건 덮어쓰거나 5432로 바꾸지 않습니다. SSH의 `PermitOpen` 목적지와 실제 바인딩·DBeaver Main 포트가 같아야 합니다. 관리자는 기존 세션을 유지한 상태에서 아래 1단계의 정책 확인 및 `sshd -T -C user=<실제계정>,host=client,addr=<접속PC의IP>`로 적용값을 확인합니다. 비밀번호 로그인 자체가 조회 전용 DB 권한을 보장하지 않으므로 아래 6단계의 계정 검증은 별도로 필요합니다.
+운영 Compose의 호스트 포트, SSH의 `PermitOpen` 목적지, 실제 서버 바인딩, DBeaver Main 포트는 모두 `127.0.0.1:15432`로 맞춰야 합니다. 컨테이너 내부 PostgreSQL 포트와 봇 주소는 `5432`로 유지합니다. 관리자는 기존 세션을 유지한 상태에서 아래 1단계의 정책 확인 및 `sshd -T -C user=<실제계정>,host=client,addr=<접속PC의IP>`로 적용값을 확인합니다. 비밀번호 로그인 자체가 조회 전용 DB 권한을 보장하지 않으므로 아래 6단계의 계정 검증은 별도로 필요합니다.
 
 ## 선택 사항: 전용 키 인증 터널 계정으로 분리
 
-아래는 이전에 작성한 **5432 기준 전용 계정 구성안**이며 현재 서버에 이미 적용됐다는 뜻이 아닙니다. 현재 비밀번호 접속을 유지할지, 전용 계정으로 분리할지 결정한 뒤 필요한 단계만 적용하세요. 15432를 유지하면서 이 구성을 선택하면 아래 `permitopen`, `PermitOpen`, 바인딩 확인·DBeaver 포트를 모두 15432로 일치시킵니다. 컨테이너 내부 포트 5432는 변경하지 않습니다. 기존 배포 계정 정책도 실제 효과를 확인하고 별도 결정 없이 덮어쓰지 않습니다.
+아래 전용 계정 구성은 선택 사항이며 현재 서버에 이미 적용됐다는 뜻이 아닙니다. 현재 비밀번호 접속을 유지할지, 전용 계정으로 분리할지 결정한 뒤 필요한 단계만 적용하세요. 이 구성을 선택하면 `permitopen`, `PermitOpen`, 바인딩 확인·DBeaver 포트를 모두 `127.0.0.1:15432`로 일치시킵니다. 컨테이너 내부 포트와 봇 주소 `postgres:5432`는 변경하지 않습니다. 기존 배포 계정 정책도 실제 효과를 확인하고 별도 결정 없이 덮어쓰지 않습니다.
 
 ## 1. 먼저 관리자 계정에서 확인
 
@@ -57,7 +57,7 @@ sudo -n nano /home/seulseul-tunnel/.ssh/authorized_keys
 자신의 공개키를 다음 옵션과 함께 **한 줄로** 추가합니다. 아래 예시를 그대로 키로 사용하지 않습니다.
 
 ```text
-restrict,port-forwarding,permitopen="127.0.0.1:5432" ssh-ed25519 실제공개키 seulseul-db-tunnel
+restrict,port-forwarding,permitopen="127.0.0.1:15432" ssh-ed25519 실제공개키 seulseul-db-tunnel
 ```
 
 전용 계정은 sudo·docker·seulseul-deploy 그룹에 추가하지 않습니다. 키 로그인 실패가 반복되면 fail2ban에 차단될 수 있으므로 반복 시도 대신 관리자 로그를 확인합니다.
@@ -78,7 +78,7 @@ Match User seulseul-tunnel
     KbdInteractiveAuthentication no
     DisableForwarding no
     AllowTcpForwarding local
-    PermitOpen 127.0.0.1:5432
+    PermitOpen 127.0.0.1:15432
     PermitListen none
     AllowStreamLocalForwarding no
     AllowAgentForwarding no
@@ -97,7 +97,7 @@ sudo -n /usr/sbin/sshd -T -C user=seulseul-tunnel,host=client,addr=클라이언�
 sudo -n /usr/sbin/sshd -T -C user=seulseul,host=client,addr=클라이언트IP | grep -E '^(passwordauthentication|allowtcpforwarding|disableforwarding) '
 ```
 
-전용 계정은 publickey만, local 포워딩, 목적지 127.0.0.1:5432, MaxSessions 0이어야 합니다. 기존 배포 계정은 포워딩 금지가 유지돼야 합니다. 문법·효과 검증 후에만 reload합니다.
+전용 계정은 publickey만, local 포워딩, 목적지 127.0.0.1:15432, MaxSessions 0이어야 합니다. 기존 배포 계정은 포워딩 금지가 유지돼야 합니다. 문법·효과 검증 후에만 reload합니다.
 
 ```bash
 sudo -n systemctl reload ssh.service
@@ -113,13 +113,13 @@ sudo -n systemctl reload ssh.service
 cd ~/app
 git status --short
 git pull --ff-only origin main
-ss -ltn '( sport = :5432 )'
+ss -ltn '( sport = :15432 )'
 ./run.sh
 docker compose -f compose.prod.yaml port postgres 5432
-ss -ltn '( sport = :5432 )'
+ss -ltn '( sport = :15432 )'
 ```
 
-Docker가 꺼져 있다면 `systemctl --user start docker.service` 후 실행합니다. 표시 주소는 `127.0.0.1:5432`여야 합니다. `0.0.0.0:5432` 또는 `[::]:5432`이면 즉시 봇·DB를 중지하고 설정을 확인합니다. Oracle 보안 목록이나 호스트 방화벽에 5432 허용 규칙을 추가하지 않습니다. 봇의 DATABASE_URL은 기존 `postgres:5432` 그대로입니다. 다른 서버 로컬 계정도 루프백 포트에 접근할 수 있으므로 DB 인증은 필수입니다.
+Docker가 꺼져 있다면 `systemctl --user start docker.service` 후 실행합니다. 표시 주소는 `127.0.0.1:15432`여야 합니다. `0.0.0.0:15432` 또는 `[::]:15432`이면 즉시 봇·DB를 중지하고 설정을 확인합니다. Oracle 보안 목록이나 호스트 방화벽에 15432 허용 규칙을 추가하지 않습니다. 봇의 DATABASE_URL은 기존 `postgres:5432` 그대로입니다. 다른 서버 로컬 계정도 루프백 포트에 접근할 수 있으므로 DB 인증은 필수입니다.
 
 ## 6. 조회 전용 DB 계정
 
@@ -150,7 +150,7 @@ PostgreSQL 연결을 만들고 아래 값을 입력합니다. 포트가 다른 S
 
 | 탭 | 항목 | 값 |
 | --- | --- | --- |
-| Main | Host / Port | `127.0.0.1` / `5432` |
+| Main | Host / Port | `127.0.0.1` / `15432` |
 | Main | Database | 운영 POSTGRES_DB 값 |
 | Main | User / Password | `seulseul_reader` / 6단계에서 정한 비밀번호 |
 | SSH | Use SSH Tunnel | 활성화 |
