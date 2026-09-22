@@ -62,6 +62,17 @@ class SqlAlchemyStudentRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._session_factory = session_factory
 
+    def recipient_ids(self, workspace_id: str) -> list[str]:
+        """현재 가입한 학생만 워크스페이스별로 조회한다."""
+        with self._session_factory() as session:
+            return list(
+                session.scalars(
+                    select(StudentModel.slack_user_id)
+                    .where(StudentModel.workspace_id == workspace_id)
+                    .order_by(StudentModel.slack_user_id)
+                )
+            )
+
     def get(self, workspace_id: str, slack_user_id: str) -> Student | None:
         with self._session_factory() as session:
             row = session.scalar(

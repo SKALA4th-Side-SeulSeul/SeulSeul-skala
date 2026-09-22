@@ -2,6 +2,9 @@
 
 ## 패키지 책임
 
+운영 안내는 `announce.sh` → `users/announce.py` → 학생 저장소 조회 및
+`slack/client.py`의 일반 DM 발송 경로를 사용합니다. 기존 체크리스트·공지 데이터는 변경하지 않습니다.
+
 | 위치 | 책임 |
 | --- | --- |
 | `src/seulseul/slack/` | Slack 이벤트·상호작용 처리, 화면, Slack API 연동 |

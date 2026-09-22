@@ -40,6 +40,7 @@ def operations(tmp_path, monkeypatch):
         "notice.sh",
         "retry.sh",
         "admin.sh",
+        "announce.sh",
         "notice_edit.sh",
         "scripts/scheduling.sh",
         "scripts/operations.sh",
@@ -93,6 +94,23 @@ fi
         return path.read_text().splitlines()
 
     return repo, run, calls
+
+
+def test_announcement_runs_only_one_shot_tool(operations):
+    _, run, calls = operations
+    result = run("announce.sh")
+    assert result.returncode == 0
+    assert calls()[-1].endswith(
+        "run --rm --no-deps --interactive --tty bot python -m seulseul.users.announce"
+    )
+    assert not any("up -d" in call or "exec" in call for call in calls())
+
+
+def test_announcement_help_needs_no_environment(operations):
+    repo, run, calls = operations
+    (repo / ".env").unlink()
+    assert run("announce.sh", "--help").returncode == 0
+    assert calls() == []
 
 
 def test_run_builds_stops_migrates_then_recreates_single_bot(operations):
