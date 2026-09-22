@@ -53,6 +53,7 @@ services:
   bot:
     <<: *bot-common
     entrypoint: ["/app/scripts/run_bot.sh"]
+    command: ["python", "-m", "seulseul.main"]
     restart: unless-stopped
     mem_limit: 512m
 
