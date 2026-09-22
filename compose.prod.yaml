@@ -52,6 +52,7 @@ services:
 
   bot:
     <<: *bot-common
+    entrypoint: ["/app/scripts/run_bot.sh"]
     restart: unless-stopped
     mem_limit: 512m
 
