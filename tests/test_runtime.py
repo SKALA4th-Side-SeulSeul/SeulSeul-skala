@@ -37,4 +37,5 @@ def test_production_bot_uses_the_static_token_entrypoint():
     dockerfile = (ROOT / "Dockerfile").read_text()
 
     assert 'entrypoint: ["/app/scripts/run_bot.sh"]' in compose
+    assert 'command: ["python", "-m", "seulseul.main"]' in compose
     assert "COPY scripts/run_bot.sh ./scripts/run_bot.sh" in dockerfile
