@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_production_database_port_is_only_bound_to_ipv4_loopback():
     config = (ROOT / "compose.prod.yaml").read_text()
     assert config.count("    ports:\n") == 2
-    assert '    ports:\n      - "127.0.0.1:5432:5432"\n' in config
+    assert '    ports:\n      - "127.0.0.1:15432:5432"\n' in config
+    assert '    ports:\n      - "127.0.0.1:5432:5432"\n' not in config
     assert '      - "127.0.0.1:${SLACK_OAUTH_PORT:-8080}:8080"\n' in config
     assert "image: ngrok/ngrok:3.39.11-debian" in config
     assert "NGROK_AUTHTOKEN" in config

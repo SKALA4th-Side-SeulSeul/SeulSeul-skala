@@ -43,7 +43,7 @@ PostgreSQL과 Docker Compose의 환경별 작업·운영 기록입니다. 현재
 | 메모리 | 이 계정의 모든 프로세스·컨테이너 합계 최대 6GB |
 
 - 접속은 SSH로 직접 로그인합니다. `sudo -iu seulseul`처럼 계정을 전환하면 Rootless Docker가 동작하지 않을 수 있습니다.
-- 위 SSH 그룹 정책은 당시 상태입니다. 이후 15432·기존 비밀번호 SSH 터널 안내 후 DBeaver 접속 성공이 확인됐으므로 실제 계정·포워딩 적용값은 재확인합니다. 현재 접속과 전용 계정 선택안은 `docs/DB-ACCESS.md`를 따릅니다.
+- 위 SSH 그룹 정책은 당시 상태입니다. 운영 PostgreSQL 호스트 포트는 `127.0.0.1:15432`로 통일하고, 기존 비밀번호 SSH 터널 안내 후 DBeaver 접속 성공이 확인됐으므로 실제 계정·포워딩 적용값은 재확인합니다. 컨테이너 내부 포트는 `5432`이며, 현재 접속과 전용 계정 선택안은 `docs/DB-ACCESS.md`를 따릅니다.
 - 비밀번호는 비밀번호 관리자에서 무작위로 생성해 보관하고, 채팅·문서·저장소에 적지 않습니다.
 - 설정 파일: `/etc/ssh/sshd_config.d/90-seulseul-password.conf` (원본 백업 `/root/90-seulseul-password.conf.bak`)
 
@@ -51,7 +51,7 @@ PostgreSQL과 Docker Compose의 환경별 작업·운영 기록입니다. 현재
 
 - **`sudo netfilter-persistent save`를 실행하지 않습니다.** 현재 적용된 규칙을 그대로 저장해 fail2ban 차단 목록이 규칙 파일에 섞입니다. 방화벽을 바꿀 때는 `/etc/iptables/rules.v4`를 직접 수정하고 `sudo -n sh -c 'iptables-restore --test < /etc/iptables/rules.v4'`로 시험한 뒤 적용합니다.
 - **규칙 파일에는 fail2ban 규칙(`f2b-…`)을 넣지 않습니다.** fail2ban이 시작할 때 스스로 추가합니다.
-- **컨테이너 포트를 외부 인터페이스에 공개하지 않습니다.** PostgreSQL은 루프백 바인딩·SSH 터널로만 접근합니다. 저장소 5432와 접속 성공 안내 15432의 차이는 재배포 전 확인합니다. `0.0.0.0`, `[::]`, IP 생략 바인딩과 DB 포트 방화벽 개방은 금지합니다. SSH의 허용 목적지는 실제 루프백 DB 포트로 제한하며 적용값을 확인합니다.
+- **컨테이너 포트를 외부 인터페이스에 공개하지 않습니다.** PostgreSQL 호스트 포트는 `127.0.0.1:15432`에만 바인딩하고 SSH 터널로만 접근합니다. 컨테이너 내부 포트와 봇의 DB 주소는 `5432`입니다. `0.0.0.0`, `[::]`, IP 생략 바인딩과 DB 포트 방화벽 개방은 금지합니다. SSH의 허용 목적지는 실제 루프백 DB 포트 `127.0.0.1:15432`로 제한하며 적용값을 확인합니다.
 - **일반 Docker 서비스를 다시 켜지 않습니다.** 필요하면 이유를 `docs/DECISIONS.md`에 기록한 뒤 켭니다.
 - **`/etc/default/netfilter-persistent`는 Oracle 이미지 설정(`IPTABLES_RESTORE_NOFLUSH=yes`)을 유지합니다.**
 - `ubuntu` 계정의 관리 명령은 `sudo -n`으로 실행합니다. `sudo` 없이 `systemctl restart` 등을 실행하면 비밀번호를 물은 뒤 실패합니다.
