@@ -3,13 +3,13 @@ _metadata:
   minor_version: 1
 
 display_information:
-  name: SeulSeul
+  name: 슬슬
   description: Slack 공지를 학생별 체크리스트로 관리합니다.
   background_color: "#2F6B5F"
 
 features:
   bot_user:
-    display_name: SeulSeul
+    display_name: seulseul
     always_online: true
   slash_commands:
     - command: /seulseul

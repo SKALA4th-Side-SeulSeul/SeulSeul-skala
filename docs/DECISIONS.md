@@ -9,6 +9,14 @@
 - 결과: 서버에서 `./run.sh`를 실행해 PostgreSQL 컨테이너를 재생성해야 적용됩니다. `docker compose port postgres 5432`의 출력은 `127.0.0.1:15432`여야 하며, 기존 데이터 볼륨은 삭제하지 않습니다.
 
 
+## D-036 — Slack 앱 표시 이름을 한국어 `슬슬`로 변경
+
+- 날짜: 2026-09-22
+- 상태: 저장소 manifest 반영. Slack App Manifest 저장과 운영 워크스페이스 화면 확인은 별도.
+- 내용: `display_information.name`은 `슬슬`로 설정하고, `features.bot_user.display_name`은 Slack manifest가 허용하는 ASCII 식별자 `seulseul`로 설정합니다. 봇 코드·토큰·DB는 변경하지 않습니다.
+- 이유: 앱과 봇 프로필에 표시되는 서비스 이름을 한국어로 통일하면서 Slack이 요구하는 봇 사용자 식별자 규칙을 지키기 위함입니다.
+- 결과: Slack 앱 설정의 App Manifest에 변경 내용을 저장하면 기존 설치에도 표시 이름이 전파됩니다. 권한·scope 변경이 아니므로 이름 변경만으로 재설치하지 않습니다.
+
 ## D-034 — 통합 운영 공지 콘솔과 다중 링크 식별
 
 - 날짜: 2026-09-21
