@@ -57,6 +57,14 @@ def test_profile_sync_does_not_fetch_or_enroll_unregistered_students(profile_rep
     fetch.assert_not_called()
 
 
+def test_student_service_returns_student_name_for_operation_logs(profile_repository):
+    service = StudentService(profile_repository)
+    service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_홍길동")
+
+    assert service.display_name(WORKSPACE_ID, USER_ID) == "홍길동"
+    assert service.display_name(WORKSPACE_ID, "UOTHER") is None
+
+
 def test_profile_sync_never_recreates_a_student_deleted_during_lookup(profile_repository):
     service = StudentService(profile_repository)
     service.enroll(WORKSPACE_ID, USER_ID, "4기_광주_3반_가상학생")

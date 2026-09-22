@@ -321,6 +321,17 @@ def test_command_responder_sends_only_to_command_user() -> None:
     ]
 
 
+def test_start_command_logs_student_name(caplog):
+    caplog.set_level(logging.INFO)
+    handler, _ = create_command_handler()
+
+    handler(RecordingAck(), RecordingAck(), {**COMMAND, "text": "시작"}, logging.getLogger("test"))
+
+    assert "actor=홍길동" in caplog.text
+    assert "action=시작" in caplog.text
+    assert "result=가입 완료" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("action", "real_name", "workspace_id"),
     [
@@ -1188,6 +1199,17 @@ def test_checklist_handler_acknowledges_before_delegating():
     )
 
 
+def test_checklist_handler_logs_student_name(caplog):
+    caplog.set_level(logging.INFO)
+    service = Mock()
+    service.handle_action.return_value = True
+    handler = create_checklist_action_handler(service, lambda workspace, user: "홍길동")
+
+    handler(lambda: None, Mock(), action_body(), logging.getLogger("test"))
+
+    assert '"actor_name": "홍길동"' in caplog.text
+
+
 @pytest.mark.parametrize(
     "error",
     [ChecklistActionError("최신 메시지를 이용해 주세요."), RuntimeError("sensitive DB details")],
@@ -1262,6 +1284,7 @@ def test_button_logs_share_trace_and_exclude_payload_and_exception_details(caplo
     assert logs[0]["trace_id"] != logs[2]["trace_id"]
     assert len({entry["instance_id"] for entry in logs}) == 1
     assert logs[1]["error_type"] == "RuntimeError"
+    assert logs[1]["operation"] == "complete"
     assert logs[0]["operation"] == "complete"
     assert logs[0]["message_ts"] == "123.456"
     for hidden in (

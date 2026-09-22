@@ -50,24 +50,40 @@ def create_seulseul_command_handler(
             logger.warning("명령어 식별자 누락: action=%s", action)
             return
 
+        actor_name = _safe_actor_name(student_service.display_name, workspace_id, user_id)
+        result = "실패"
         try:
             if action == START_ACTION:
-                _enroll_student(student_service, profile_provider, workspace_id, user_id, logger)
+                enrolled = _enroll_student(
+                    student_service, profile_provider, workspace_id, user_id, logger
+                )
+                if enrolled:
+                    actor_name = _safe_actor_name(
+                        student_service.display_name, workspace_id, user_id
+                    )
+                    result = "가입 완료"
+                else:
+                    result = "가입 실패"
             elif action == WITHDRAW_ACTION:
-                student_service.withdraw(workspace_id, user_id)
+                deleted = student_service.withdraw(workspace_id, user_id)
+                result = "해지 완료" if deleted else "미가입"
             else:
-                logger.info("지원하지 않는 슬래시 명령 입력")
+                result = "지원하지 않는 명령"
         except ChecklistDeliveryError as error:
-            logger.warning("명령 DM 처리 실패: code=%s", error.code)
+            logger.warning(
+                "명령 DM 처리 실패: actor=%s action=%s code=%s", actor_name, action, error.code
+            )
             return
         except Exception as error:
-            logger.error("슬래시 명령 처리 실패: type=%s", type(error).__name__)
+            logger.error(
+                "슬래시 명령 처리 실패: actor=%s action=%s type=%s",
+                actor_name,
+                action,
+                type(error).__name__,
+            )
             return
         logger.info(
-            "명령어 처리: command=%s action=%s channel=%s",
-            command.get("command"),
-            action,
-            command.get("channel_id"),
+            "명령어 처리: actor=%s action=%s result=%s", actor_name, action or "없음", result
         )
 
     return handle_seulseul_command
@@ -79,15 +95,26 @@ def _enroll_student(
     workspace_id: str,
     user_id: str,
     logger: logging.Logger,
-) -> None:
+) -> bool:
     try:
         student_service.enroll_from_profile(workspace_id, user_id, profile_provider.get_real_name)
     except UserProfileError:
         logger.warning("가입 실패: Slack 성명 조회 실패; users:read 권한·프로필 확인 필요")
-        return
+        return False
     except InvalidStudentRealNameError:
         logger.warning("가입 실패: Slack 성명 형식 불일치")
-        return
+        return False
+    return True
+
+
+def _safe_actor_name(
+    provider: Callable[[str, str], str | None], workspace_id: str, user_id: str
+) -> str:
+    try:
+        name = provider(workspace_id, user_id)
+    except Exception:
+        return "사용자 확인 실패"
+    return name if isinstance(name, str) and name else "사용자 확인 실패"
 
 
 def create_message_event_handler(
@@ -203,7 +230,10 @@ def register_handlers(
     app.event("user_change")(create_user_change_handler(student_service, permalink_provider))
 
 
-def create_checklist_action_handler(service: DailyChecklistService) -> Callable[..., None]:
+def create_checklist_action_handler(
+    service: DailyChecklistService,
+    actor_name_provider: Callable[[str, str], str | None] | None = None,
+) -> Callable[..., None]:
     def handle_checklist_action(
         ack: Callable[..., None],
         respond: Callable[..., None],
@@ -213,23 +243,30 @@ def create_checklist_action_handler(service: DailyChecklistService) -> Callable[
         ack()
         responder = SlackCommandResponder(respond)
         trace_id = uuid4().hex
+        actor_name = "사용자 확인 실패"
+        operation = "unknown"
         try:
             action = body["actions"][0]
             operation = str(action["action_id"]).removeprefix("checklist_")
+            workspace_id = str(body["team"]["id"])
+            user_id = str(body["user"]["id"])
+            if actor_name_provider is not None:
+                actor_name = _safe_actor_name(actor_name_provider, workspace_id, user_id)
             log_event(
                 logger,
                 logging.INFO,
                 "checklist_action_received",
                 trace_id=trace_id,
+                actor_name=actor_name,
                 operation=operation if operation in OPERATIONS else "unknown",
-                workspace_ref=identifier_ref(str(body["team"]["id"])),
-                user_ref=identifier_ref(str(body["user"]["id"])),
+                workspace_ref=identifier_ref(workspace_id),
+                user_ref=identifier_ref(user_id),
                 channel_ref=identifier_ref(str(body["container"]["channel_id"])),
                 message_ts=timestamp_for_log(str(body["container"]["message_ts"])),
             )
             updated = service.handle_action(
-                str(body["team"]["id"]),
-                str(body["user"]["id"]),
+                workspace_id,
+                user_id,
                 str(body["container"]["channel_id"]),
                 str(body["container"]["message_ts"]),
                 operation,
@@ -239,10 +276,23 @@ def create_checklist_action_handler(service: DailyChecklistService) -> Callable[
             if not updated:
                 responder.send("변경은 저장했습니다. DM 갱신을 기다리거나 새로고침을 눌러 주세요.")
         except (KeyError, IndexError, TypeError):
-            log_event(logger, logging.WARNING, "checklist_action_invalid_body", trace_id=trace_id)
+            log_event(
+                logger,
+                logging.WARNING,
+                "checklist_action_invalid_body",
+                trace_id=trace_id,
+                actor_name=actor_name,
+            )
             responder.send("버튼 정보를 확인할 수 없습니다. 최신 체크리스트를 이용해 주세요.")
         except ChecklistActionError as error:
-            log_event(logger, logging.WARNING, "checklist_action_rejected", trace_id=trace_id)
+            log_event(
+                logger,
+                logging.WARNING,
+                "checklist_action_rejected",
+                trace_id=trace_id,
+                actor_name=actor_name,
+                operation=operation if operation in OPERATIONS else "unknown",
+            )
             responder.send(str(error))
         except Exception as error:
             log_event(
@@ -250,6 +300,8 @@ def create_checklist_action_handler(service: DailyChecklistService) -> Callable[
                 logging.ERROR,
                 "checklist_action_error",
                 trace_id=trace_id,
+                actor_name=actor_name,
+                operation=operation if operation in OPERATIONS else "unknown",
                 error_type=type(error).__name__,
             )
             responder.send("처리 결과를 확인하지 못했습니다. 잠시 후 새로고침해 주세요.")
@@ -257,7 +309,12 @@ def create_checklist_action_handler(service: DailyChecklistService) -> Callable[
     return handle_checklist_action
 
 
-def register_checklist_handlers(app: App, service: DailyChecklistService) -> None:
+def register_checklist_handlers(
+    app: App,
+    service: DailyChecklistService,
+    student_service: StudentService | None = None,
+) -> None:
+    actor_name_provider = student_service.display_name if student_service is not None else None
     app.action(re.compile(r"^checklist_(complete|undo|pending|completed|previous|next|refresh)$"))(
-        create_checklist_action_handler(service)
+        create_checklist_action_handler(service, actor_name_provider)
     )
