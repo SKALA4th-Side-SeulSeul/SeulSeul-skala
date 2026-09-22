@@ -15,6 +15,11 @@ def test_production_database_port_is_only_bound_to_ipv4_loopback():
     assert config.count("    ports:\n") == 2
     assert '    ports:\n      - "127.0.0.1:5432:5432"\n' in config
     assert '      - "127.0.0.1:${SLACK_OAUTH_PORT:-8080}:8080"\n' in config
+    assert "image: ngrok/ngrok:3.39.11-debian" in config
+    assert "NGROK_AUTHTOKEN" in config
+    assert "NGROK_DOMAIN" in config
+    assert "oauth:8080" in config
+    assert "service_healthy" in config
     assert '      - "0.0.0.0' not in config and '      - "[::]' not in config
     assert "postgres_prod_data:/var/lib/postgresql" in config
 
@@ -91,10 +96,10 @@ def test_run_builds_stops_migrates_then_recreates_single_bot(operations):
     expected = [
         "config --quiet",
         "build bot migrate oauth",
-        "stop bot oauth",
+        "stop bot oauth ngrok",
         "up -d --wait --wait-timeout 180 postgres",
         "run --rm migrate",
-        "up -d --no-deps --force-recreate --scale bot=1 bot oauth",
+        "up -d --no-deps --force-recreate --scale bot=1 bot oauth ngrok",
         "ps -a",
     ]
     assert len(steps) == len(expected) + 2
@@ -174,20 +179,24 @@ def test_run_failure_never_starts_bot(operations, failure):
     assert run("run.sh").returncode == 17
     assert not any("--force-recreate" in call for call in calls())
     if failure != "run --rm migrate":
-        assert not any(call.endswith("stop bot oauth") for call in calls())
+        assert not any(call.endswith("stop bot oauth ngrok") for call in calls())
 
 
-@pytest.mark.parametrize("operation", ["all", "bot", "postgres"])
+@pytest.mark.parametrize("operation", ["all", "bot", "oauth", "ngrok", "postgres"])
 def test_stop_preserves_data_and_stops_bot_before_database(operations, operation):
     _, run, calls = operations
     assert run("stop.sh", operation).returncode == 0
     steps = calls()
     if operation == "bot":
         assert steps[3].endswith("stop bot")
+    elif operation == "oauth":
+        assert steps[3].endswith("stop ngrok oauth")
+    elif operation == "ngrok":
+        assert steps[3].endswith("stop ngrok")
     elif operation == "postgres":
-        assert steps[3].endswith("stop bot oauth postgres")
+        assert steps[3].endswith("stop bot oauth ngrok postgres")
     else:
-        assert steps[3].endswith("stop bot oauth")
+        assert steps[3].endswith("stop bot oauth ngrok")
     if operation == "all":
         assert steps[4].endswith("stop postgres")
     assert not any(" down" in call or "volume" in call for call in steps)
@@ -229,6 +238,13 @@ def test_views_do_not_start_or_stop_services(operations, command):
     if command in {"db", "schema"}:
         assert "default_transaction_read_only=on" in steps[-1]
         assert '"$POSTGRES_USER"' in steps[-1]
+
+
+def test_view_accepts_ngrok_logs(operations):
+    _, run, calls = operations
+    result = run("view.sh", "logs", "ngrok")
+    assert result.returncode == 0
+    assert calls()[-1].endswith("logs --tail 100 -f ngrok")
 
 
 def test_missing_env_and_nonrootless_docker_fail_before_mutation(operations):

@@ -74,8 +74,33 @@ services:
       - "127.0.0.1:${SLACK_OAUTH_PORT:-8080}:8080"
     volumes:
       - oauth_data:/var/lib/seulseul/oauth
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
     mem_limit: 256m
+
+  ngrok:
+    image: ngrok/ngrok:3.39.11-debian
+    command:
+      - http
+      - oauth:8080
+      - --url
+      - https://${NGROK_DOMAIN:?NGROK_DOMAIN을 운영 서버 .env에 설정하세요}
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?NGROK_AUTHTOKEN을 운영 서버 .env에 설정하세요}
+    depends_on:
+      oauth:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 128m
 
 volumes:
   postgres_prod_data:
