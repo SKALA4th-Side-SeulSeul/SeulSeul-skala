@@ -133,7 +133,7 @@ def main() -> None:
         profile_update=checklist_service.profile_update,
     )
     app = create_app(slack_settings, notice_service, student_service)
-    register_checklist_handlers(app, checklist_service)
+    register_checklist_handlers(app, checklist_service, student_service)
     scheduler = ChecklistScheduler(
         lambda: refresh_checklists(checklist_service, scheduler.stopped.is_set),
         wakeup,

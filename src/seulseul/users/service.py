@@ -71,6 +71,16 @@ class StudentService:
     def _profile_lock(self, workspace_id: str, user_id: str):
         return self._profile_locks[hash((workspace_id, user_id)) % len(self._profile_locks)]
 
+    def display_name(self, workspace_id: str, user_id: str) -> str | None:
+        """운영 로그에 표시할 가입자의 이름 부분을 반환한다."""
+        student = self._repository.get(workspace_id, user_id)
+        if student is None:
+            return None
+        try:
+            return parse_student_real_name(student.real_name).student_name
+        except InvalidStudentRealNameError:
+            return None
+
     def sync_profile(
         self, workspace_id: str, user_id: str, get_real_name: Callable[[str], str]
     ) -> bool:

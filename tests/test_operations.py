@@ -251,27 +251,53 @@ def test_view_accepts_ngrok_logs(operations):
     assert calls()[-1].endswith("logs --no-color --tail 100 ngrok")
 
 
-def test_view_formats_log_levels_and_diagnostic_events(operations):
+def test_view_formats_human_activity_without_internal_identifiers(operations):
     repo, run, _ = operations
     (repo / "emit-logs").write_text(
         "\n".join(
             [
                 (
                     "seulseul-prod-bot-1  | "
-                    "2026-09-22 04:28:04,663 INFO seulseul.main: "
-                    "Socket Mode로 Slack에 연결합니다."
+                    "2026-09-22 05:46:31,339 INFO main.py:handle_message_event: "
+                    "메시지 이벤트 제외: channel=C0BE3PB2STC ts=1790055990.976559"
                 ),
                 (
                     "seulseul-prod-bot-1  | "
-                    "2026-09-22 04:28:05,000 WARNING seulseul.checklists: "
-                    "개인 DM 갱신 실패"
+                    "2026-09-22 05:52:55,354 INFO main.py:handle_checklist_action: "
+                    '{"diagnostic_version": 1, "event": "checklist_action_received", '
+                    '"trace_id": "trace-hidden", "actor_name": "홍길동", "operation": "refresh"}'
                 ),
                 (
                     "seulseul-prod-bot-1  | "
-                    "2026-09-22 04:28:06,000 ERROR seulseul.checklists: "
-                    '{"diagnostic_version":1,"event":"checklist_action_error",'
-                    '"trace_id":"trace-1234","operation":"refresh",'
-                    '"reason":"invalid_delivery"}'
+                    "2026-09-22 05:52:55,354 INFO seulseul.checklists.service: "
+                    '{"diagnostic_version": 1, "event": "checklist_action_parsed", '
+                    '"trace_id": "trace-hidden"}'
+                ),
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 05:52:55,360 INFO seulseul.checklists.repository: "
+                    '{"diagnostic_version": 1, "event": "checklist_message_validation", '
+                    '"trace_id": "trace-hidden", "result": "payload_match", '
+                    '"reason": "match"}'
+                ),
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 05:52:55,376 INFO seulseul.checklists.service: "
+                    '{"diagnostic_version": 1, "event": "checklist_action_result", '
+                    '"trace_id": "trace-hidden", "saved": true, '
+                    '"dm_synchronized": true}'
+                ),
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 05:53:33,932 ERROR seulseul.checklists.service: "
+                    '{"diagnostic_version": 1, "event": "checklist_action_error", '
+                    '"trace_id": "error-hidden", "actor_name": "김철수", '
+                    '"operation": "complete"}'
+                ),
+                (
+                    "seulseul-prod-bot-1  | "
+                    "2026-09-22 05:54:00,000 INFO main.py:handle_seulseul_command: "
+                    "명령어 처리: actor=홍길동 action=시작 result=가입 완료"
                 ),
             ]
         )
@@ -281,14 +307,16 @@ def test_view_formats_log_levels_and_diagnostic_events(operations):
     result = run("view.sh", "logs", "bot")
 
     assert result.returncode == 0, result.stderr
-    assert "[INFO]" in result.stdout
-    assert "[WARN]" in result.stdout
-    assert "[ERROR]" in result.stdout
-    assert "checklist_action_error" in result.stdout
-    assert "operation=refresh" in result.stdout
-    assert "reason=invalid_delivery" in result.stdout
-    assert "trace=trace-1234" in result.stdout
-    assert "Ctrl+C" not in result.stdout
+    assert "시각 | 상태 | 주체 | 작업 결과" in result.stdout
+    assert "Slack | 수집 대상이 아닌 메시지를 무시했습니다" in result.stdout
+    assert "홍길동 | 체크리스트 새로고침 완료 · 개인 DM 갱신 완료" in result.stdout
+    assert "김철수 | 공지 완료 처리 실패 · 운영자 확인 필요" in result.stdout
+    assert "trace-hidden" not in result.stdout
+    assert "C0BE3PB2STC" not in result.stdout
+    assert "1790055990.976559" not in result.stdout
+    assert "event=" not in result.stdout
+    assert "payload_match" not in result.stdout
+    assert "홍길동 | /seulseul 시작 · 가입 완료" in result.stdout
 
     follow_result = run("view.sh", "logs", "bot", "--follow")
 
@@ -300,8 +328,8 @@ def test_view_formats_log_levels_and_diagnostic_events(operations):
 
     assert raw_result.returncode == 0, raw_result.stderr
     assert "Docker 원본 로그" in raw_result.stdout
-    assert "bot-1  | 2026-09-22 04:28:04,663 INFO" in raw_result.stdout
-    assert "[INFO]" not in raw_result.stdout
+    assert "channel=C0BE3PB2STC" in raw_result.stdout
+    assert "trace-hidden" in raw_result.stdout
 
 
 def test_missing_env_and_nonrootless_docker_fail_before_mutation(operations):
