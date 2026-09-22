@@ -15,6 +15,7 @@
 
 - [ ] 두 개발자 환경의 설치와 `./scripts/check.sh` 통과 확인
 - [ ] 운영 bot 이미지 재생성 후 OAuth 환경변수가 있어도 정적 `SLACK_BOT_TOKEN`으로 연결되고 멀티 워크스페이스 설치 오류가 사라지는지 확인
+- [ ] Slack App Manifest에 표시 이름 `슬슬`을 저장한 뒤 운영 워크스페이스의 새 메시지·앱 프로필에 반영됐는지 확인
 - [ ] 실제 한국어 공지 표본으로 Qwen3 로컬 분석 결과 검증
 - [ ] Qwen3 로컬 처리와 개인정보 처리 정책 확정
 - [ ] Oracle 운영 봇 컨테이너에서 Ollama `/api/chat` 접근 및 `think=false` 실제 처리 확인
