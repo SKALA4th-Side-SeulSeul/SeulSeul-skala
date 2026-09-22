@@ -62,8 +62,8 @@ def run_command(service: NoticeService, args: argparse.Namespace) -> int:
         if not notices:
             print("현재 설정된 채널에 재처리할 실패 공지가 없습니다.")
             return 0
-        for notice in notices:
-            print(f"워크스페이스: {notice.workspace_id}")
+        for index, notice in enumerate(notices, 1):
+            print(f"{index}. 워크스페이스: {notice.workspace_id}")
             print(f"원문: {notice.source_permalink or '조회 실패 — 재처리 시 다시 조회합니다.'}")
             print(f"실패 원인: {_safe_error(notice.last_error)}")
             print(
@@ -95,12 +95,26 @@ def run_command(service: NoticeService, args: argparse.Namespace) -> int:
             print("조회 한도에 도달했습니다. --limit 또는 --workspace-id로 범위를 조정하세요.")
         return 0
 
-    notice = service.retry_failed_notice(
-        args.workspace_id,
-        args.url,
-        getattr(args, "channel_id", None),
-        getattr(args, "message_ts", None),
-    )
+    index = getattr(args, "index", None)
+    if index is not None:
+        notices = service.failed_notices(
+            getattr(args, "limit", 20), workspace_id=getattr(args, "workspace_id", None)
+        )
+        if not 1 <= index <= len(notices):
+            print(f"선택한 번호가 없습니다. 1~{len(notices)} 사이에서 선택하세요.")
+            return 1
+        selected = notices[index - 1]
+        workspace_id = selected.workspace_id
+        url = selected.original_url
+        channel_id = selected.channel_id
+        message_ts = selected.message_ts
+        print(f"번호 {index} 공지를 재처리합니다.")
+    else:
+        workspace_id = args.workspace_id
+        url = args.url
+        channel_id = getattr(args, "channel_id", None)
+        message_ts = getattr(args, "message_ts", None)
+    notice = service.retry_failed_notice(workspace_id, url, channel_id, message_ts)
     if notice.processing_status == "processed":
         print(
             "재처리 성공: 기존 공지의 분석 결과를 갱신했습니다. "
@@ -124,11 +138,23 @@ def main(argv: list[str] | None = None) -> int:
     pending.add_argument("--workspace-id")
     pending.add_argument("--limit", type=_positive_limit, default=20)
     retrying = commands.add_parser("retry", help="선택한 실패 공지 하나 재처리")
-    retrying.add_argument("--workspace-id", required=True)
-    retrying.add_argument("--url", required=True, help="공지의 제출 링크 (Slack 원문 링크 아님)")
+    retrying.add_argument("--index", type=_positive_limit, help="list와 같은 목록의 번호")
+    retrying.add_argument("--limit", type=_positive_limit, default=20)
+    retrying.add_argument("--workspace-id", help="직접 지정하거나 --index와 함께 선택 범위를 좁힘")
+    retrying.add_argument("--url", help="공지의 제출 링크 (Slack 원문 링크 아님)")
     retrying.add_argument("--channel-id", help="재처리할 원본 채널 ID")
     retrying.add_argument("--message-ts", help="재처리할 원본 메시지 ts")
     args = parser.parse_args(argv)
+    if args.action == "retry":
+        explicit = (
+            args.url is not None or args.channel_id is not None or args.message_ts is not None
+        )
+        if args.index is None and (args.workspace_id is None or args.url is None):
+            parser.error("retry에는 --index 또는 --workspace-id와 --url이 필요합니다.")
+        if args.index is not None and explicit:
+            parser.error(
+                "--index를 사용할 때 --url·--channel-id·--message-ts를 함께 지정하지 마세요."
+            )
 
     # CLI에서는 아래의 정제한 오류만 표시하고 원시 AI 오류 응답을 로그로 노출하지 않는다.
     logging.basicConfig(level=logging.ERROR)

@@ -1362,12 +1362,62 @@ def test_retry_cli_list_prints_command_without_calling_ai_or_exposing_source(
 
     assert run_command(service, Namespace(action="list", workspace_id=None, limit=20)) == 0
     output = capsys.readouterr().out
+    assert "1. 워크스페이스:" in output
     assert "seulseul.notices.retry retry" in output
     assert WORKSPACE_ID in output and original.original_url in output
     assert "상태 코드: 500" in output
     assert "비공개 원문" not in output and "nvapi-secret" not in output
     assert original.text not in output
     assert analyzer.calls == []
+
+
+def test_retry_cli_index_selects_failed_notice_without_copying_identifiers(capsys):
+    repository = InMemoryNoticeRepository(10)
+    original = failed_notice()
+    repository.add(original)
+    analyzer = FakeAnalyzer()
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=analyzer, repository=repository)
+
+    exit_code = run_command(
+        service,
+        Namespace(
+            action="retry",
+            index=1,
+            limit=20,
+            workspace_id=None,
+            url=None,
+            channel_id=None,
+            message_ts=None,
+        ),
+    )
+
+    assert exit_code == 0
+    assert analyzer.calls == [(original.text, original.original_url, original.posted_at)]
+    assert "번호 1" in capsys.readouterr().out
+
+
+def test_retry_cli_index_out_of_range_does_not_call_ai(capsys):
+    analyzer = FakeAnalyzer()
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, analyzer=analyzer, repository=InMemoryNoticeRepository(10)
+    )
+
+    exit_code = run_command(
+        service,
+        Namespace(
+            action="retry",
+            index=1,
+            limit=20,
+            workspace_id=None,
+            url=None,
+            channel_id=None,
+            message_ts=None,
+        ),
+    )
+
+    assert exit_code == 1
+    assert analyzer.calls == []
+    assert "번호가 없습니다" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("failure", [False, True])

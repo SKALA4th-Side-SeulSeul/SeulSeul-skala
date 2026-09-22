@@ -11,12 +11,20 @@ usage() {
 사용법:
   ./retry.sh list [--limit N] [--workspace-id ID]
   ./retry.sh pending [--limit N] [--workspace-id ID]
+  ./retry.sh retry --index N [--limit N] [--workspace-id ID]
   ./retry.sh retry --workspace-id ID --url URL [--channel-id ID] [--message-ts TS]
 
 설명:
   list     AI 분석에 실패한 공지와 자동 재처리 예약을 조회합니다. (기본 동작)
   pending  아직 적용되지 않은 Slack 원본 식별자를 조회합니다.
-  retry    선택한 실패 공지 하나를 즉시 다시 분석합니다.
+  retry    실패 목록 번호를 선택해 공지 하나를 즉시 다시 분석합니다.
+
+번호 선택:
+  list에서 보이는 순서와 같은 번호를 --index에 넣습니다.
+  예: ./retry.sh retry --index 1 --limit 100
+
+고급 지정:
+  목록 번호를 쓰지 않을 때는 workspace ID와 제출 링크를 직접 지정합니다.
 
 URL은 Slack 메시지 링크가 아니라 공지에 포함된 제출 링크(forms/docs)입니다.
 USAGE

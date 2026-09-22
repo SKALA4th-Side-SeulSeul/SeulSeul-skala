@@ -38,6 +38,8 @@ def operations(tmp_path, monkeypatch):
         "backup_run.sh",
         "backup_stop.sh",
         "notice.sh",
+        "retry.sh",
+        "admin.sh",
         "notice_edit.sh",
         "scripts/scheduling.sh",
         "scripts/operations.sh",
@@ -73,12 +75,13 @@ fi
     docker.chmod(0o700)
     monkeypatch.setenv("PATH", str(binaries), prepend=":")
 
-    def run(script, *args):
+    def run(script, *args, input_text=None):
         return subprocess.run(
             ["bash", str(repo / script), *args],
             cwd=tmp_path,
             capture_output=True,
             text=True,
+            input=input_text,
             timeout=10,
             check=False,
         )
@@ -138,6 +141,43 @@ def test_notice_runs_unified_console_without_starting_another_bot(operations):
     assert not any(
         "seulseul.main" in call or " up " in call or " stop " in call for call in calls()
     )
+
+
+def test_retry_help_explains_number_selection_without_docker_or_env(operations):
+    repo, run, calls = operations
+    (repo / ".env").unlink()
+
+    result = run("retry.sh", "--help")
+
+    assert result.returncode == 0
+    assert "--index N" in result.stdout
+    assert calls() == []
+
+
+def test_admin_help_explains_the_shortcuts_without_docker_or_env(operations):
+    repo, run, calls = operations
+    (repo / ".env").unlink()
+
+    result = run("admin.sh", "--help")
+
+    assert result.returncode == 0
+    assert "./view.sh dashboard" in result.stdout
+    assert "./retry.sh retry --index N" in result.stdout
+    assert "./notice.sh" in result.stdout
+    assert calls() == []
+
+
+def test_admin_opens_read_only_dashboard_and_exits_from_menu(operations):
+    _, run, calls = operations
+
+    result = run("admin.sh", input_text="q\n")
+
+    assert result.returncode == 0, result.stderr
+    assert any(
+        call.endswith("run --rm --no-deps -T bot python -m seulseul.notices.dashboard")
+        for call in calls()
+    )
+    assert "관리자 메뉴를 종료합니다." in result.stdout
 
 
 def test_notice_help_does_not_require_docker_or_env(operations):
@@ -225,6 +265,7 @@ def test_setup_never_overwrites_existing_env_and_creates_private_template(operat
         ("stop.sh", ["all", "extra"]),
         ("view.sh", ["logs", "--bad"]),
         ("view.sh", ["status", "extra"]),
+        ("admin.sh", ["unknown"]),
     ],
 )
 def test_invalid_arguments_never_call_docker(operations, script, args):
@@ -249,6 +290,15 @@ def test_view_accepts_ngrok_logs(operations):
     result = run("view.sh", "logs", "ngrok")
     assert result.returncode == 0
     assert calls()[-1].endswith("logs --no-color --tail 100 ngrok")
+
+
+def test_view_dashboard_runs_read_only_dashboard_cli(operations):
+    _, run, calls = operations
+    result = run("view.sh", "dashboard")
+
+    assert result.returncode == 0, result.stderr
+    assert calls()[-1].endswith("run --rm --no-deps -T bot python -m seulseul.notices.dashboard")
+    assert not any(" up " in call or " stop " in call for call in calls())
 
 
 def test_view_formats_human_activity_without_internal_identifiers(operations):
