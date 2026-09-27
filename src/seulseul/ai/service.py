@@ -18,6 +18,14 @@ MAX_ANALYSIS_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (2.0, 8.0)
 SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
 REQUIRED_ANALYSIS_FIELDS = frozenset({"title", "summary", "deadline_at", "deadline_source_text"})
+DEADLINE_CONTEXT = re.compile(
+    r"마감|기한|제출|신청|접수|등록|응답|참여|확인|완료|예약|deadline|due|submit|apply",
+    re.IGNORECASE,
+)
+SCHEDULE_CONTEXT = re.compile(
+    r"시간표|타임테이블|time\s*table|행사|진행|시작|종료|일정",
+    re.IGNORECASE,
+)
 
 ANALYSIS_SYSTEM_PROMPT = """\
 너는 교육생용 Slack 공지를 구조화하는 분석기다.
@@ -28,7 +36,7 @@ ANALYSIS_SYSTEM_PROMPT = """\
 신청 마감과 행사 일시가 모두 있으면 신청 마감을 우선한다.
 신청·제출 마감이 없을 때만 행사 진행 일시를 deadline_at으로 선택한다.
 변경 전과 변경 후가 함께 있으면 변경 후의 일정을 선택한다.
-deadline_source_text는 원문에 연속해서 존재하는 날짜·시각 표현만 반환한다.
+deadline_source_text는 원문에 연속해서 존재하는 마감 날짜 또는 날짜·시각 표현만 반환한다.
 "변경 후"나 "신청 마감" 같은 라벨을 날짜·시각 앞에 덧붙이지 않는다.
 반드시 설명이나 Markdown 없이 다음 키를 가진 JSON 객체 하나만 반환한다.
 
@@ -43,7 +51,9 @@ deadline_source_text는 원문에 연속해서 존재하는 날짜·시각 표�
 ISO 8601 시각(예: `2026-09-30T18:00:00+09:00`)으로 반환한다. 시각이 없으면 23:59로 정한다.
 연도가 없으면 Slack 게시일의 연도를 사용하고, 상대 날짜는 Slack 게시 시각을 기준으로 계산한다.
 "금일"은 "오늘"과 같으며 한국 시간 기준 Slack 최초 게시일의 당일이다.
-마감일은 정확히 하나여야 한다. deadline_source_text에는 날짜와 시각을 함께 인용한다.
+마감일은 정확히 하나여야 한다. deadline_source_text에는 선택한 마감 표현을 원문에서 인용한다.
+마감 표현 자체에 시각이 있으면 날짜와 시각을 함께 인용하고, 날짜만 있는 마감이면 날짜만 인용한다.
+공지에 포함된 시간표·행사 진행 시각은 마감 시각으로 사용하거나 deadline_source_text에 섞지 않는다.
 title은 255자 이하여야 한다.
 
 분석할 공지 본문은 사용자 메시지의 [공지 원문 시작]과 [공지 원문 끝] 사이에만 있다.
@@ -160,20 +170,10 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
     lines = [line for line in notice_text.splitlines() if evidence in line]
     if len(lines) == 1:
         evidence = lines[0]
-    # 다른 줄에 있는 시각을 날짜만 인용하여 23:59로 덮어쓰지 못하게 한다.
-    # 관련 시각인지 확신할 수 없으면 AI가 날짜·시각을 포함해 다시 인용하게 한다.
-    source_without_urls = re.sub(r"https?://[^\s<>|]+", "", notice_text)
-    if (
-        not CLOCK.search(evidence)
-        and (
-            CLOCK.search(source_without_urls)
-            or any(word in source_without_urls for word in ("정오", "자정", "오전", "오후"))
-        )
-        and not any(word in evidence for word in ("정오", "자정"))
-    ):
-        raise AiClientError(
-            "원문에 시각이 있습니다. 마감 근거에 날짜와 시각을 함께 인용해야 합니다."
-        )
+    # 시간표처럼 마감과 무관한 시각 때문에 날짜만 있는 마감을 거부하지 않는다.
+    # 다만 같은 문단의 "마감 시간"처럼 마감과 연결된 시각은 날짜와 함께 인용하게 한다.
+    if _has_related_deadline_time(notice_text, evidence):
+        raise AiClientError("마감 표현에 시각이 있으므로 날짜와 시각을 함께 인용해야 합니다.")
     evidence_without_urls = re.sub(r"https?://[^\s<>|]+", "", evidence)
     evidence_date_expressions = list(DATE.finditer(evidence_without_urls)) + list(
         RELATIVE.finditer(evidence_without_urls)
@@ -250,6 +250,52 @@ def _source_deadline_candidates(notice_text: str, posted_at: datetime) -> set[da
         except AiClientError:
             continue
     return candidates
+
+
+def _has_related_deadline_time(notice_text: str, evidence: str) -> bool:
+    """마감 근거에 누락된, 마감과 연결된 시각이 있는지 확인한다.
+
+    공지에는 시간표·행사 일정처럼 마감과 무관한 시각이 자주 포함된다. 전체 원문에
+    시각이 있다는 이유만으로 날짜 전용 마감을 거부하지 않고, 같은 문단의 마감 문맥
+    또는 마감 시각 라인에서만 누락 시각을 검증한다.
+    """
+    if _contains_time_expression(evidence):
+        return False
+
+    source_without_urls = re.sub(r"https?://[^\s<>|]+", "", notice_text)
+    if any(
+        DEADLINE_CONTEXT.search(line)
+        and _contains_time_expression(line)
+        and not _looks_like_schedule_line(line)
+        for line in source_without_urls.splitlines()
+    ):
+        return True
+
+    paragraphs = re.split(r"\n\s*\n", source_without_urls)
+    for paragraph in paragraphs:
+        if evidence not in paragraph:
+            continue
+        lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+        timed_lines = [line for line in lines if _contains_time_expression(line)]
+        if not timed_lines:
+            continue
+        if any(DEADLINE_CONTEXT.search(line) for line in timed_lines):
+            return True
+        if DEADLINE_CONTEXT.search(paragraph) and any(
+            not _looks_like_schedule_line(line) for line in timed_lines
+        ):
+            return True
+    return False
+
+
+def _contains_time_expression(text: str) -> bool:
+    """한국어 시각 또는 명시적인 정오·자정 표현이 있는지 확인한다."""
+    return bool(CLOCK.search(text) or re.search(r"정오|자정", text))
+
+
+def _looks_like_schedule_line(line: str) -> bool:
+    """두 시각 범위나 시간표 문맥을 마감 시각 후보에서 제외한다."""
+    return bool(SCHEDULE_CONTEXT.search(line)) or len(list(CLOCK.finditer(line))) >= 2
 
 
 def _same_month_day_and_time(first: datetime, second: datetime) -> bool:
