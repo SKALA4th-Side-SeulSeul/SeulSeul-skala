@@ -180,7 +180,7 @@ def test_analyzer_returns_validated_json_result() -> None:
     assert "신청 마감과 행사 일시가 모두 있으면 신청 마감을 우선한다." in client.calls[0][0]
     assert "변경 전과 변경 후가 함께 있으면 변경 후의 일정을 선택한다." in client.calls[0][0]
     assert (
-        "deadline_source_text는 원문에 연속해서 존재하는 날짜·시각 표현만 반환한다."
+        "deadline_source_text는 원문에 연속해서 존재하는 마감 날짜 또는 날짜·시각 표현만 반환한다."
         in client.calls[0][0]
     )
 
@@ -428,6 +428,66 @@ def test_date_quote_cannot_hide_time_on_another_line():
         ).deadline_at.hour
         == 18
     )
+
+
+def test_date_only_deadline_ignores_unrelated_timetable_times():
+    notice_text = (
+        "@here 여러분~ 긴 연휴가 끝나고 다시 일상이 시작됐습니다!\n"
+        "생성형 AI 서비스 개발의 이해/활용 (LangChain) 교과목 종료 서베이 "
+        "https://forms.gle/example에 참여해주세요.\n"
+        "※ 서베이는 익명으로 진행되며, 교육 품질 관리에 활용될 예정입니다.\n"
+        "※ 마감일 : ~9/30(수)\n\n"
+        "금일 타임테이블입니다.\n\n"
+        "RAG Pipeline 설계 및 구축\n"
+        "Day1 Time Table\n"
+        "09:00 ~ 09:50 Intro: Why RAG?\n"
+        "10:00 ~ 10:50 How RAG Works\n"
+        "11:00 ~ 11:50 Building RAG Pipeline : Indexing\n"
+        "13:10 ~ 14:00 Building RAG Pipeline : Runtime\n"
+        "14:10 ~ 15:00 Limits of Basic RAG\n"
+        "15:10 ~ 18:00 Hands-on"
+    )
+    posted_at = datetime(2026, 9, 27, 23, 38, 2, tzinfo=SEOUL)
+
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at="2026-09-30T23:59:00+09:00",
+            deadline_source_text="9/30(수)",
+        ),
+        notice_text,
+        posted_at,
+    )
+
+    assert result.deadline_at == datetime(2026, 9, 30, 23, 59, tzinfo=SEOUL)
+
+
+def test_date_only_deadline_ignores_schedule_range_in_same_paragraph():
+    notice_text = "설문 마감일: 9/30(수)\n교육 시간표: 09:00 ~ 18:00"
+
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at="2026-09-30T23:59:00+09:00",
+            deadline_source_text="9/30(수)",
+        ),
+        notice_text,
+        POSTED_AT,
+    )
+
+    assert result.deadline_at == datetime(2026, 9, 30, 23, 59, tzinfo=SEOUL)
+
+
+def test_related_deadline_time_requires_time_in_evidence_across_paragraphs():
+    notice_text = "설문 마감일: 9/30(수)\n\n마감 시간: 오후 6시"
+
+    with pytest.raises(AiClientError, match="함께 인용"):
+        parse_notice_analysis(
+            analysis_json(
+                deadline_at="2026-09-30T23:59:00+09:00",
+                deadline_source_text="9/30(수)",
+            ),
+            notice_text,
+            POSTED_AT,
+        )
 
 
 @pytest.mark.parametrize("title", ["A" * 256, "제목\x00"])
