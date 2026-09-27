@@ -9,7 +9,9 @@ Slack Socket Mode로 연결하므로 공개 URL 없이 로컬에서 실행할 �
 import logging
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from threading import Event
+from zoneinfo import ZoneInfo
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -38,6 +40,26 @@ from seulseul.users.repository import SqlAlchemyStudentRepository
 from seulseul.users.service import StudentService
 
 logger = logging.getLogger(__name__)
+SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+class SeoulFormatter(logging.Formatter):
+    """서버·컨테이너의 OS 시간대와 관계없이 로그 시각을 한국 시간으로 표시한다."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        timestamp = datetime.fromtimestamp(record.created, SEOUL_TIMEZONE)
+        if datefmt:
+            return timestamp.strftime(datefmt)
+        return f"{timestamp:%Y-%m-%d %H:%M:%S},{int(record.msecs):03d}"
+
+
+def configure_logging() -> None:
+    """애플리케이션 로그의 표시 시간대를 `Asia/Seoul`로 고정한다."""
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    formatter = SeoulFormatter(LOG_FORMAT)
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(formatter)
 
 
 def create_notice_service(
@@ -89,10 +111,7 @@ def create_app(
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging()
     try:
         slack_settings = load_slack_settings()
         ai_settings = load_ai_settings()
