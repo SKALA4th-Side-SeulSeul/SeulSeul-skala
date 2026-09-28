@@ -63,6 +63,26 @@ class RecordingMessenger:
         self.sent: list[tuple] = []
         self.updated: list[tuple] = []
         self.error: ChecklistDeliveryError | None = None
+        self.reminders = []
+        self.reminder_updates = []
+        self.reminder_deletes = []
+        self.reminder_error = None
+
+    def send_reminder(self, reminder):
+        if self.reminder_error:
+            raise self.reminder_error
+        self.reminders.append(reminder)
+        return f"D{reminder.user_id}", f"200.{len(self.reminders)}"
+
+    def update_reminder(self, reminder):
+        if self.reminder_error:
+            raise self.reminder_error
+        self.reminder_updates.append(reminder)
+
+    def delete_reminder(self, channel, ts):
+        if self.reminder_error:
+            raise self.reminder_error
+        self.reminder_deletes.append((channel, ts))
 
     def send(self, user_id, board):
         if self.error:
@@ -382,6 +402,185 @@ def click(service, daily, operation, item=None, *, user="UONE", workspace=WORKSP
     return service.handle_action(
         workspace, user, daily.dm_channel_id, daily.message_ts, operation, json.dumps(value)
     )
+
+
+@pytest.mark.parametrize("hours,count", [(25, 0), (24, 1), (1, 1), (0, 0)])
+def test_reminder_window_and_restart(daily_system, hours, count):
+    factory, repository, messenger, clock, service = daily_system
+    add_student(factory)
+    add_notice(factory, deadline_at=NOW + timedelta(hours=hours))
+    service.run_due()
+    DailyChecklistService(
+        repository, messenger, WORKSPACE, TARGETS, clock=lambda: clock[0]
+    ).run_due()
+    assert len(messenger.reminders) == count
+
+
+@pytest.mark.parametrize("action", ["close", "complete"])
+def test_reminder_action_only_changes_own_selected_item(daily_system, action):
+    factory, _, messenger, _, service = daily_system
+    student = add_student(factory)
+    add_student(factory, user="UTWO")
+    add_notice(factory, deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    with factory() as session:
+        item = session.scalar(select(ChecklistModel).where(ChecklistModel.student_id == student))
+        daily = session.scalar(
+            select(DailyChecklistMessageModel).where(
+                DailyChecklistMessageModel.student_id == student
+            )
+        )
+        target = (item.reminder_channel_id, item.reminder_message_ts)
+    # 아직 배정되지 않은 새 공지가 있어도 버튼 처리에서 다른 알림을 발송하지 않는다.
+    add_notice(factory, deadline_at=NOW + timedelta(hours=3))
+    if action == "close":
+        service.close_reminder(WORKSPACE, "UONE", *target, str(item.id))
+    else:
+        click(service, daily, "complete", item.id)
+    assert messenger.reminder_deletes == [target]
+    assert len(messenger.reminders) == 2
+    with factory() as session:
+        other = session.scalar(select(ChecklistModel).where(ChecklistModel.student_id != student))
+        assert other.reminder_status == "sent" and other.completed_at is None
+        own = session.get(ChecklistModel, item.id)
+        assert (own.completed_at is not None) == (action == "complete")
+    if action == "complete":
+        click(service, daily, "undo", item.id)
+    else:
+        service.close_reminder(WORKSPACE, "UONE", *target, str(item.id))
+    assert len(messenger.reminders) == 2
+    assert messenger.reminder_deletes == [target]
+
+
+def test_reminder_close_rejects_other_user_and_wrong_address(daily_system):
+    factory, _, messenger, _, service = daily_system
+    add_student(factory)
+    add_student(factory, user="UTWO")
+    add_notice(factory, deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    reminder = next(r for r in messenger.reminders if r.user_id == "UONE")
+    for workspace, user, channel, ts in [
+        ("TOTHER", "UONE", "DUONE", "200.1"),
+        (WORKSPACE, "UTWO", "DUONE", "200.1"),
+        (WORKSPACE, "UONE", "DOTHER", "200.1"),
+        (WORKSPACE, "UONE", "DUONE", "old"),
+    ]:
+        with pytest.raises(ChecklistActionError):
+            service.close_reminder(workspace, user, channel, ts, str(reminder.item_id))
+    assert messenger.reminder_deletes == []
+
+
+def test_reminder_interrupted_update_reapplies_current_content(daily_system):
+    factory, repository, messenger, clock, service = daily_system
+    add_student(factory)
+    notice_id = add_notice(factory, title="A", deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    original = messenger.reminders[0]
+    recipient = repository.recipient(WORKSPACE, "UONE")
+    with factory() as session, session.begin():
+        session.get(NoticeModel, notice_id).title = "B"
+    update = repository.reminders.prepare(recipient, ("CALL",), original.item_id, clock[0])
+    messenger.update_reminder(update)  # Slack 성공 후 DB 저장 전에 종료된 상황.
+    with factory() as session, session.begin():
+        session.get(NoticeModel, notice_id).title = "A"
+    service.run_due()
+    assert [r.title for r in messenger.reminder_updates] == ["B", "A"]
+
+
+@pytest.mark.parametrize("reason", ["expired", "deleted", "class_changed"])
+def test_reminder_no_longer_eligible_is_deleted(daily_system, reason):
+    factory, _, messenger, clock, service = daily_system
+    student_id = add_student(factory)
+    notice_id = add_notice(factory, channel_id="CCLASS3", deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    with factory() as session, session.begin():
+        if reason == "expired":
+            clock[0] += timedelta(hours=2)
+        elif reason == "deleted":
+            session.get(NoticeModel, notice_id).deleted_at = NOW
+        else:
+            session.get(StudentModel, student_id).class_number = 1
+    service.run_due()
+    service.run_due()
+    assert messenger.reminder_deletes == [("DUONE", "200.1")]
+
+
+def test_reminder_extended_deadline_waits_and_reset_preserves_suppression(daily_system):
+    factory, _, messenger, clock, service = daily_system
+    add_student(factory)
+    notice_id = add_notice(factory, deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    with factory() as session, session.begin():
+        session.get(NoticeModel, notice_id).deadline_at = NOW + timedelta(days=3)
+    service.run_due()
+    assert messenger.reminder_deletes == [("DUONE", "200.1")]
+    assert len(messenger.reminders) == 1
+    clock[0] += timedelta(days=2)
+    service.run_due()
+    assert len(messenger.reminders) == 2
+    with service.reset_messages(WORKSPACE, "UONE"):
+        pass
+    service.run_due()
+    assert len(messenger.reminders) == 2
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_reminder_known_failure_retries_but_uncertain_does_not(daily_system, uncertain):
+    factory, _, messenger, clock, service = daily_system
+    add_student(factory)
+    add_notice(factory, deadline_at=NOW + timedelta(hours=2))
+    messenger.reminder_error = ChecklistDeliveryError("slack_connection_error", uncertain=uncertain)
+    service.run_due()
+    messenger.reminder_error = None
+    service.run_due()
+    assert messenger.reminders == []
+    clock[0] += timedelta(seconds=60)
+    service.run_due()
+    assert len(messenger.reminders) == (0 if uncertain else 1)
+
+
+def test_reminder_close_retry_preserves_only_selected_delete(daily_system):
+    factory, _, messenger, clock, service = daily_system
+    add_student(factory)
+    add_notice(factory, deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    messenger.reminder_error = ChecklistDeliveryError("ratelimited", retry_after=90)
+    service.close_reminder(WORKSPACE, "UONE", "DUONE", "200.1", str(messenger.reminders[0].item_id))
+    messenger.reminder_error = None
+    service.run_due()
+    assert messenger.reminder_deletes == []
+    clock[0] += timedelta(seconds=90)
+    service.run_due()
+    assert messenger.reminder_deletes == [("DUONE", "200.1")]
+    assert len(messenger.reminders) == 1
+
+
+def test_closing_before_deadline_edit_is_displayed_does_not_recreate_reminder(daily_system):
+    factory, _, messenger, _, service = daily_system
+    add_student(factory)
+    notice_id = add_notice(factory, deadline_at=NOW + timedelta(hours=2))
+    service.run_due()
+    with factory() as session, session.begin():
+        session.get(NoticeModel, notice_id).deadline_at = NOW + timedelta(hours=3)
+    service.close_reminder(WORKSPACE, "UONE", "DUONE", "200.1", str(messenger.reminders[0].item_id))
+    service.run_due()
+    assert len(messenger.reminders) == 1
+
+
+def test_one_students_lock_does_not_block_another_students_action(daily_system):
+    from concurrent.futures import ThreadPoolExecutor
+
+    service = daily_system[-1]
+
+    def available():
+        lock = service._student_lock(WORKSPACE, "UTWO")
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        return acquired
+
+    with service._student_lock(WORKSPACE, "UONE"), ThreadPoolExecutor(max_workers=1) as executor:
+        assert executor.submit(available).result(timeout=1)
 
 
 def test_source_edits_link_removal_restoration_and_delete_update_same_dm(daily_system):

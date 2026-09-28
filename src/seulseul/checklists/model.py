@@ -51,6 +51,12 @@ class ChecklistModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     canonical_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminder_status: Mapped[str | None] = mapped_column(String(16))
+    reminder_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminder_channel_id: Mapped[str | None] = mapped_column(String(32))
+    reminder_message_ts: Mapped[str | None] = mapped_column(String(32))
+    reminder_hash: Mapped[str | None] = mapped_column(String(64))
+    reminder_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

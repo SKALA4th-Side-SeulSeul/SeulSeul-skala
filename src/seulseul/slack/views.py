@@ -9,6 +9,37 @@ from zoneinfo import ZoneInfo
 from seulseul.checklists.model import ChecklistItem, DailyChecklistBoard
 
 
+def build_reminder_message(reminder):
+    title = escape(_short_title(reminder.title), quote=False).replace("|", "｜")
+    deadline = reminder.deadline.astimezone(ZoneInfo("Asia/Seoul"))
+    return {
+        "text": f"제출 마감 알림: {reminder.title} · {deadline:%m/%d %H:%M} 마감",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "plain_text", "text": "⏰ 제출 마감이 다가오고 있어요"},
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{_link_icon(reminder.url)} *<{_link(reminder.url)}|{title}>*",
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "닫기"},
+                    "action_id": "reminder_close",
+                    "value": str(reminder.item_id),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "plain_text", "text": f"{deadline:%m/%d %H:%M} 마감"}],
+            },
+        ],
+    }
+
+
 def build_daily_checklist_message(
     board: DailyChecklistBoard, *, use_container: bool = True
 ) -> dict[str, Any]:

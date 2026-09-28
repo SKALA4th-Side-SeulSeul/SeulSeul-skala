@@ -52,6 +52,54 @@ def cleanup_client():
     return client
 
 
+def test_reminder_normal_dm_right_close_and_safe_handler():
+    from seulseul.checklists.reminder_repository import Reminder
+    from seulseul.slack.handlers import create_reminder_close_handler
+
+    reminder = Reminder(
+        uuid4(),
+        uuid4(),
+        "UTEST",
+        "send",
+        "DTEST",
+        "100.1",
+        "설문 <제출>",
+        "https://forms.example.test/task",
+        datetime(2026, 9, 30, 4, 10, tzinfo=timezone.utc),
+        "hash",
+    )
+    client = cleanup_client()
+    client.chat_postMessage.return_value = {"ts": "100.1"}
+    adapter = SlackChecklistClient(client)
+    assert adapter.send_reminder(reminder) == ("DTEST", "100.1")
+    payload = client.chat_postMessage.call_args.kwargs
+    assert payload["blocks"][1]["accessory"]["action_id"] == "reminder_close"
+    assert "&lt;제출&gt;" in payload["blocks"][1]["text"]["text"]
+    assert "09/30 13:10" in payload["text"]
+    client.chat_postEphemeral.assert_not_called()
+    adapter.update_reminder(reminder)
+    adapter.delete_reminder("DTEST", "100.1")
+    client.chat_delete.assert_called_once_with(channel="DTEST", ts="100.1")
+    service, ack, respond = Mock(), Mock(), Mock()
+    body = {
+        "team": {"id": "TTEST"},
+        "user": {"id": "UTEST"},
+        "container": {"channel_id": "DTEST", "message_ts": "100.1"},
+        "actions": [{"value": str(reminder.item_id)}],
+    }
+    handler = create_reminder_close_handler(service)
+    handler(ack, respond, body, logging.getLogger(__name__))
+    ack.assert_called_once_with()
+    service.close_reminder.assert_called_once_with(
+        "TTEST", "UTEST", "DTEST", "100.1", str(reminder.item_id)
+    )
+    respond.assert_not_called()
+    service.close_reminder.side_effect = ChecklistActionError("본인 알림만 닫을 수 있습니다.")
+    handler(ack, respond, body, logging.getLogger(__name__))
+    assert respond.call_args.kwargs["replace_original"] is False
+    assert respond.call_args.kwargs["delete_original"] is False
+
+
 @pytest.mark.parametrize("deleted", [True, False])
 def test_withdrawal_confirmation_is_normal_dm_not_ephemeral(deleted):
     client = cleanup_client()

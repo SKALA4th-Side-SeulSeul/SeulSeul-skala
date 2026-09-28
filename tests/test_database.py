@@ -28,3 +28,33 @@ def test_create_database_engine_and_session_factory_do_not_connect_eagerly() -> 
     assert session_factory.kw["expire_on_commit"] is False
 
     engine.dispose()
+
+
+def test_reminder_migration_preserves_rows_and_matches_model():
+    from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine, inspect
+
+    from seulseul.checklists.model import ChecklistModel
+
+    scripts = ScriptDirectory.from_config(Config("alembic.ini"))
+    assert scripts.get_current_head() == "e05243bd795f"
+    migration = scripts.get_revision("e05243bd795f").module
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE checklists (id INTEGER PRIMARY KEY)")
+        connection.exec_driver_sql("INSERT INTO checklists VALUES (1)")
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+            actual = {col["name"] for col in inspect(connection).get_columns("checklists")}
+            expected = {
+                name
+                for name in ChecklistModel.__table__.columns.keys()
+                if name.startswith("reminder_")
+            }
+            assert actual - {"id"} == expected
+            migration.downgrade()
+        assert connection.exec_driver_sql("SELECT id FROM checklists").scalar_one() == 1
+    engine.dispose()

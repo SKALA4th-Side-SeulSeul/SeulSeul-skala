@@ -20,6 +20,7 @@ from seulseul.checklists.model import (
     DailyChecklistMessageModel,
     DeliveryClaim,
 )
+from seulseul.checklists.reminder_repository import ReminderRepository
 from seulseul.notices.model import NoticeModel
 from seulseul.users.model import StudentModel
 
@@ -48,6 +49,7 @@ def _aware(value: datetime) -> datetime:
 class SqlAlchemyChecklistRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._session_factory = session_factory
+        self.reminders = ReminderRepository(session_factory)
 
     def recipients(self, workspace_id: str) -> list[ChecklistRecipient]:
         with self._session_factory() as session:
@@ -79,6 +81,19 @@ class SqlAlchemyChecklistRepository:
             condition = DailyChecklistMessageModel.student_id.in_(student_ids)
             if finished:
                 session.execute(delete(DailyChecklistMessageModel).where(condition))
+                session.execute(
+                    update(ChecklistModel)
+                    .where(
+                        ChecklistModel.student_id.in_(student_ids),
+                        ChecklistModel.reminder_status.is_not(None),
+                    )
+                    .values(
+                        reminder_status="closed",
+                        reminder_channel_id=None,
+                        reminder_message_ts=None,
+                        reminder_retry_at=None,
+                    )
+                )
             else:
                 result = session.execute(
                     update(DailyChecklistMessageModel)

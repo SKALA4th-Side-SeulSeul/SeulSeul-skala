@@ -315,6 +315,29 @@ def register_checklist_handlers(
     student_service: StudentService | None = None,
 ) -> None:
     actor_name_provider = student_service.display_name if student_service is not None else None
+    app.action("reminder_close")(create_reminder_close_handler(service))
     app.action(re.compile(r"^checklist_(complete|undo|pending|completed|previous|next|refresh)$"))(
         create_checklist_action_handler(service, actor_name_provider)
     )
+
+
+def create_reminder_close_handler(service):
+    def handle(ack, respond, body, logger):
+        ack()
+        try:
+            service.close_reminder(
+                body["team"]["id"],
+                body["user"]["id"],
+                body["container"]["channel_id"],
+                body["container"]["message_ts"],
+                body["actions"][0]["value"],
+            )
+        except ChecklistActionError as error:
+            SlackCommandResponder(respond).send(str(error))
+        except Exception as error:
+            logger.warning("마감 알림 닫기 오류: type=%s", type(error).__name__)
+            SlackCommandResponder(respond).send(
+                "알림을 닫지 못했습니다. 잠시 후 다시 시도해 주세요."
+            )
+
+    return handle

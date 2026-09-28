@@ -18,6 +18,8 @@ from seulseul.checklists.model import (
     ChecklistRecipient,
     DailyChecklistBoard,
 )
+from seulseul.checklists.reminder_repository import Reminder
+from seulseul.checklists.reminders import ReminderService
 from seulseul.checklists.repository import SqlAlchemyChecklistRepository
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,9 @@ class ChecklistMessenger(Protocol):
     def send(self, user_id: str, board: DailyChecklistBoard) -> tuple[str, str]: ...
     def update(self, channel_id: str, message_ts: str, board: DailyChecklistBoard) -> None: ...
     def delete_previous_messages(self, workspace_id: str, user_id: str) -> None: ...
+    def send_reminder(self, reminder: Reminder) -> tuple[str, str]: ...
+    def update_reminder(self, reminder: Reminder) -> None: ...
+    def delete_reminder(self, channel_id: str, message_ts: str) -> None: ...
 
 
 def board_hash(board: DailyChecklistBoard) -> str:
@@ -47,30 +52,32 @@ class DailyChecklistService:
         targets: Mapping[str, int | None],
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        notify: Callable[[], None] = lambda: None,
     ) -> None:
         self._repository = repository
         self._messenger = messenger
         self._workspace_id = workspace_id
         self._targets = dict(targets)
         self._clock = clock
-        self._notify = notify
-        # 단일 봇 프로세스에서 명령과 스케줄러의 Slack 호출까지 직렬화한다.
-        self._delivery_lock = RLock()
+        self._reminders = ReminderService(repository.reminders, messenger, clock)
+        # 단일 봇에서 같은 학생의 처리만 직렬화한다. 다른 학생의 버튼은 막지 않는다.
+        self._delivery_locks = {}
+
+    def _student_lock(self, workspace_id, user_id):
+        return self._delivery_locks.setdefault((workspace_id, user_id), RLock())
 
     @contextmanager
     def profile_update(self, workspace_id: str, user_id: str) -> Iterator[None]:
         """반 변경과 기존 DM 편집을 직렬화한다. 메시지·발송 기록을 삭제하지 않는다."""
         if workspace_id != self._workspace_id:
             raise ChecklistDeliveryError("invalid_workspace")
-        with self._delivery_lock:
+        with self._student_lock(workspace_id, user_id):
             yield
 
     @contextmanager
     def reset_messages(self, workspace_id: str, user_id: str) -> Iterator[None]:
         if workspace_id != self._workspace_id:
             raise ChecklistDeliveryError("invalid_workspace")
-        with self._delivery_lock:
+        with self._student_lock(workspace_id, user_id):
             self._repository.reset_messages(workspace_id, user_id, finished=False)
             self._messenger.delete_previous_messages(workspace_id, user_id)
             yield
@@ -94,8 +101,32 @@ class DailyChecklistService:
                 logger.error("개인 체크리스트 동기화 오류: type=%s", type(error).__name__)
 
     def _synchronize(self, recipient: ChecklistRecipient, daily_id: UUID | None = None) -> bool:
-        with self._delivery_lock:
-            return self._synchronize_locked(recipient, daily_id=daily_id)
+        with self._student_lock(recipient.workspace_id, recipient.user_id):
+            try:
+                return self._synchronize_locked(recipient, daily_id=daily_id)
+            finally:
+                if daily_id is None:  # 버튼은 전체 알림 동기화를 하지 않는다.
+                    self._sync_reminders(recipient)
+
+    def _sync_reminders(self, recipient, item_id=None):
+        try:
+            self._reminders.synchronize(recipient, self._channels(recipient), item_id)
+        except Exception as error:
+            logger.error("마감 알림 동기화 오류: type=%s", type(error).__name__)
+
+    def close_reminder(self, workspace_id, user_id, channel_id, message_ts, value):
+        if workspace_id != self._workspace_id:
+            raise ChecklistActionError("이 워크스페이스의 알림이 아닙니다.")
+        try:
+            item_id = UUID(value)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ChecklistActionError("알림 정보를 확인할 수 없습니다.") from error
+        with self._student_lock(workspace_id, user_id):
+            recipient = self._repository.recipient(workspace_id, user_id)
+            if recipient is None:
+                raise ChecklistActionError("현재 가입되어 있지 않습니다.")
+            self._repository.reminders.close(recipient, item_id, channel_id, message_ts)
+            self._sync_reminders(recipient, item_id)
 
     def _synchronize_locked(
         self, recipient: ChecklistRecipient, *, daily_id: UUID | None = None
@@ -140,7 +171,7 @@ class DailyChecklistService:
         *,
         trace_id: str | None = None,
     ) -> bool:
-        with self._delivery_lock:
+        with self._student_lock(workspace_id, user_id):
             return self._handle_action_locked(
                 workspace_id,
                 user_id,
@@ -202,7 +233,8 @@ class DailyChecklistService:
             now,
             trace_id=trace_id,
         )
-        self._notify()
+        if operation == "complete":
+            self._sync_reminders(recipient, item_id)
         updated = self._synchronize(recipient, daily_id=effective_daily_id)
         log_event(
             logger,
