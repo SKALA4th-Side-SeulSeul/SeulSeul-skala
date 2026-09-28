@@ -10,7 +10,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError, SlackClientError
 
 from seulseul.checklists.model import ChecklistDeliveryError, DailyChecklistBoard
-from seulseul.slack.views import build_daily_checklist_message
+from seulseul.slack.views import build_daily_checklist_message, build_reminder_message
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,41 @@ class SlackChecklistClient:
     def send_announcement(self, user_id: str, text: str) -> None:
         """운영 안내를 별도 DM으로 보낸다. 재시도나 기존 DM 편집은 하지 않는다."""
         self._send_plain_dm(user_id, text)
+
+    def send_reminder(self, reminder):
+        response = self._call("conversations_open", users=reminder.user_id)
+        channel = response.get("channel", {}).get("id")
+        if not isinstance(channel, str) or not channel.startswith("D"):
+            raise ChecklistDeliveryError("invalid_dm_response")
+        response = self._call(
+            "chat_postMessage",
+            posting=True,
+            channel=channel,
+            **build_reminder_message(reminder),
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+        ts = response.get("ts")
+        if not isinstance(ts, str) or not ts:
+            raise ChecklistDeliveryError("invalid_delivery_response", uncertain=True)
+        return channel, ts
+
+    def update_reminder(self, reminder):
+        if not isinstance(reminder.channel, str) or not reminder.channel.startswith("D"):
+            raise ChecklistDeliveryError("invalid_dm_response")
+        self._call(
+            "chat_update",
+            channel=reminder.channel,
+            ts=reminder.ts,
+            **build_reminder_message(reminder),
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+
+    def delete_reminder(self, channel, ts):
+        if not isinstance(channel, str) or not channel.startswith("D"):
+            raise ChecklistDeliveryError("invalid_dm_response")
+        self._call("chat_delete", channel=channel, ts=ts)
 
     def send_enrollment_guidance(self, user_id: str, guidance: str) -> None:
         """성명 불일치 안내만 일반 DM으로 보낸다. 기존 메시지는 정리하지 않는다."""

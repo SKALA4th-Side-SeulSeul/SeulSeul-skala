@@ -141,7 +141,6 @@ def main() -> None:
         messenger,
         (workspace_id := messenger.workspace_id()),
         notice_targets,
-        notify=wakeup.set,
     )
     student_service = StudentService(
         student_repository,
