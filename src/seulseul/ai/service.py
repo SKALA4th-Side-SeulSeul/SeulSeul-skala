@@ -29,6 +29,9 @@ ISO_24_HOUR_PATTERN = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})(?P<separator>T| )24:00"
     r"(?P<seconds>:00(?:\.0+)?)?(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
 )
+DEADLINE_AT_EXPECTED_FORMAT = "YYYY-MM-DDTHH:MM:SS+09:00"
+MAX_DEADLINE_ERROR_CHARS = 255
+MAX_DEADLINE_RECEIVED_CHARS = 80
 DEADLINE_CONTEXT = re.compile(
     r"마감|기한|제출|신청|접수|등록|응답|참여|확인|완료|예약|deadline|due|submit|apply",
     re.IGNORECASE,
@@ -177,18 +180,29 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
     if len(values["title"]) > 255:
         raise AiClientError("AI 제목이 DB 저장 한도 255자를 초과했습니다.")
 
+    deadline_at_value = values["deadline_at"]
     try:
-        deadline_at = _parse_iso_deadline(values["deadline_at"])
+        deadline_at = _parse_iso_deadline(deadline_at_value)
     except ValueError as error:
-        raise AiClientError(
-            "AI 응답의 deadline_at을 ISO 8601 시각으로 해석할 수 없습니다."
+        raise _deadline_at_error(
+            "deadline_at.invalid_iso8601",
+            deadline_at_value,
+            f"{type(error).__name__}: {error}",
         ) from error
     if deadline_at.tzinfo is None:
-        raise AiClientError("AI 응답의 deadline_at에 시간대가 없습니다.")
+        raise _deadline_at_error(
+            "deadline_at.missing_timezone",
+            deadline_at_value,
+            "timezone offset is required",
+        )
     try:
         deadline_at = deadline_at.astimezone(SEOUL_TIMEZONE)
     except (ValueError, OverflowError) as error:
-        raise AiClientError("AI 마감일이 지원 범위를 벗어났습니다.") from error
+        raise _deadline_at_error(
+            "deadline_at.out_of_range",
+            deadline_at_value,
+            f"{type(error).__name__}: {error}",
+        ) from error
     evidence = values["deadline_source_text"]
     # 날짜만 인용해 같은 줄의 명시 시각을 누락하는 경우도 검증한다.
     lines = [line for line in notice_text.splitlines() if evidence in line]
@@ -247,6 +261,34 @@ def _parse_iso_deadline(value: str) -> datetime:
             f"{match.group('seconds') or ''}{match.group('offset') or ''}"
         )
         return datetime.fromisoformat(normalized_value) + timedelta(days=1)
+
+
+def _deadline_at_error(code: str, received: str, reason: str) -> AiClientError:
+    """마감 시각 오류를 DB·로그·대시보드에서 확인 가능한 형식으로 만든다."""
+    prefix = (
+        "AI 응답 형식 오류 | "
+        f"code={code} | field=deadline_at | "
+        f"expected_format={DEADLINE_AT_EXPECTED_FORMAT} | received="
+    )
+    received_preview = repr(_compact_diagnostic_value(received, MAX_DEADLINE_RECEIVED_CHARS))
+    reason_prefix = " | reason="
+    available_reason_chars = max(
+        MAX_DEADLINE_ERROR_CHARS - len(prefix) - len(received_preview) - len(reason_prefix) - 2,
+        0,
+    )
+    reason_preview = repr(_compact_diagnostic_value(reason, available_reason_chars))
+    message = f"{prefix}{received_preview}{reason_prefix}{reason_preview}"
+    return AiClientError(message[:MAX_DEADLINE_ERROR_CHARS])
+
+
+def _compact_diagnostic_value(value: str, max_chars: int) -> str:
+    """오류 기록에 포함할 값을 한 줄로 줄이고 저장 길이를 제한한다."""
+    compact_value = " ".join(value.split())
+    if len(compact_value) <= max_chars:
+        return compact_value
+    if max_chars <= 1:
+        return compact_value[:max_chars]
+    return f"{compact_value[: max_chars - 1]}…"
 
 
 def _try_expected_deadline(evidence: str, posted_at: datetime) -> datetime | None:

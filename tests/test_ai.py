@@ -267,6 +267,29 @@ def test_parse_notice_analysis_rejects_invalid_results(raw_output: str) -> None:
         parse_notice_analysis(raw_output, "9월 20일까지 제출", POSTED_AT)
 
 
+def test_invalid_deadline_at_error_records_received_value_and_expected_format() -> None:
+    invalid_deadline = "2026-09-30 24:00 KST"
+
+    with pytest.raises(AiClientError) as error:
+        parse_notice_analysis(
+            analysis_json(
+                deadline_at=invalid_deadline,
+                deadline_source_text="금일 24:00",
+            ),
+            "마감 : 금일 24:00",
+            COMMON_PHRASE_POSTED_AT,
+        )
+
+    message = str(error.value)
+    assert "code=deadline_at.invalid_iso8601" in message
+    assert "field=deadline_at" in message
+    assert "expected_format=YYYY-MM-DDTHH:MM:SS+09:00" in message
+    assert f"received={invalid_deadline!r}" in message
+    assert "reason=" in message
+    assert "ValueError: Invalid isoformat string" in message
+    assert len(message) <= 255
+
+
 def test_yearless_deadline_repairs_model_year_to_slack_post_year() -> None:
     result = parse_notice_analysis(
         analysis_json(
