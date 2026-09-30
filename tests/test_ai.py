@@ -15,6 +15,7 @@ from seulseul.ai.service import MAX_NOTICE_INPUT_CHARS, NoticeAnalyzer, parse_no
 SECRET_API_KEY = "nvapi-test-secret-key"
 SEOUL = ZoneInfo("Asia/Seoul")
 POSTED_AT = datetime(2026, 9, 14, 9, 0, tzinfo=SEOUL)
+COMMON_PHRASE_POSTED_AT = datetime(2026, 9, 30, 0, 0, tzinfo=SEOUL)
 
 
 def create_client(
@@ -173,6 +174,7 @@ def test_analyzer_returns_validated_json_result() -> None:
     assert "[공지 원문 시작]" in client.calls[0][1]
     assert "[공지 원문 끝]" in client.calls[0][1]
     assert "메타데이터 문구를 사용하지 않는다" in client.calls[0][0]
+    assert '"자정까지"는 해당 날짜의 24:00' in client.calls[0][0]
     assert (
         "신청 폼·제출 폼·등록 링크가 있으면 신청·제출·등록 마감을 deadline_at으로 선택한다."
         in client.calls[0][0]
@@ -180,7 +182,7 @@ def test_analyzer_returns_validated_json_result() -> None:
     assert "신청 마감과 행사 일시가 모두 있으면 신청 마감을 우선한다." in client.calls[0][0]
     assert "변경 전과 변경 후가 함께 있으면 변경 후의 일정을 선택한다." in client.calls[0][0]
     assert (
-        "deadline_source_text는 원문에 연속해서 존재하는 마감 날짜 또는 날짜·시각 표현만 반환한다."
+        "deadline_source_text에는 날짜와 직접 연결된 시간 표현을 함께 인용한다."
         in client.calls[0][0]
     )
 
@@ -343,8 +345,6 @@ def test_explicit_past_year_is_not_repaired() -> None:
         ("9/31", "2026-09-30T23:59:00+09:00"),
         ("9/28 자정", "2026-09-28T23:59:00+09:00"),
         ("9/28 25:00", "2026-09-28T23:59:00+09:00"),
-        ("9월 28일 오후 6시 반", "2026-09-28T18:00:00+09:00"),
-        ("9월 28일 밤 9시", "2026-09-28T09:00:00+09:00"),
     ],
 )
 def test_deadline_must_match_independently_parsed_evidence(source, deadline):
@@ -364,7 +364,10 @@ def test_deadline_must_match_independently_parsed_evidence(source, deadline):
         ("모레 오전 11시", "2026-09-16T11:00:00+09:00"),
         ("이번 주 금요일", "2026-09-18T23:59:00+09:00"),
         ("다음 주 월요일 정오", "2026-09-21T12:00:00+09:00"),
+        ("9월 28일 오후 6시 반", "2026-09-28T18:30:00+09:00"),
+        ("9월 28일 밤 9시", "2026-09-28T21:00:00+09:00"),
         ("9/28 24:00", "2026-09-29T00:00:00+09:00"),
+        ("9/28 자정까지", "2026-09-29T00:00:00+09:00"),
     ],
 )
 def test_explicit_and_relative_deadlines_match_source(source, deadline):
@@ -372,6 +375,95 @@ def test_explicit_and_relative_deadlines_match_source(source, deadline):
         analysis_json(deadline_source_text=source, deadline_at=deadline), source, POSTED_AT
     )
     assert result.deadline_at.isoformat() == deadline
+
+
+@pytest.mark.parametrize(
+    "source,deadline",
+    [
+        ("금일 밤 9시까지", "2026-09-30T21:00:00+09:00"),
+        ("금일 오후 6시 반까지", "2026-09-30T18:30:00+09:00"),
+        ("금일 여섯 시까지", "2026-09-30T06:00:00+09:00"),
+        ("금일 6 PM까지", "2026-09-30T18:00:00+09:00"),
+        ("금일 18시 30분 30초까지", "2026-09-30T18:30:30+09:00"),
+        ("명일 오후 6시까지", "2026-10-01T18:00:00+09:00"),
+        ("익일 오후 6시까지", "2026-10-01T18:00:00+09:00"),
+        ("내일모레 오후 6시까지", "2026-10-02T18:00:00+09:00"),
+        ("이틀 뒤 오후 6시까지", "2026-10-02T18:00:00+09:00"),
+        ("금주 금요일까지", "2026-10-02T23:59:00+09:00"),
+        ("차주 월요일까지", "2026-10-05T23:59:00+09:00"),
+        ("다음 달 5일까지", "2026-10-05T23:59:00+09:00"),
+        ("9월 말까지", "2026-09-30T23:59:00+09:00"),
+        ("이번 달 말일까지", "2026-09-30T23:59:00+09:00"),
+    ],
+)
+def test_common_date_and_time_phrases_are_independently_verified(source, deadline):
+    result = parse_notice_analysis(
+        analysis_json(deadline_at=deadline, deadline_source_text=source),
+        source,
+        COMMON_PHRASE_POSTED_AT,
+    )
+
+    assert result.deadline_at.isoformat() == deadline
+
+
+def test_unparsed_relative_time_does_not_default_to_end_of_day():
+    with pytest.raises(AiClientError):
+        parse_notice_analysis(
+            analysis_json(
+                deadline_at="2026-09-30T23:59:00+09:00",
+                deadline_source_text="금일 10분 전까지",
+            ),
+            "금일 10분 전까지",
+            POSTED_AT,
+        )
+
+
+def test_deadline_at_must_match_the_selected_evidence_not_an_event_time():
+    notice_text = "제출 마감: 10월 1일 오후 6시\n행사 시작: 10월 2일 오후 2시"
+
+    with pytest.raises(AiClientError, match="인용 근거"):
+        parse_notice_analysis(
+            analysis_json(
+                deadline_at="2026-10-02T14:00:00+09:00",
+                deadline_source_text="10월 1일 오후 6시",
+            ),
+            notice_text,
+            POSTED_AT,
+        )
+
+
+def test_related_date_and_time_lines_can_form_one_deadline_evidence():
+    notice_text = "마감 날짜: 금일\n마감 시간: 오후 6시\n행사 시작: 10월 2일 13:00"
+
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at="2026-09-30T18:00:00+09:00",
+            deadline_source_text="금일 오후 6시",
+        ),
+        notice_text,
+        COMMON_PHRASE_POSTED_AT,
+    )
+
+    assert result.deadline_at.isoformat() == "2026-09-30T18:00:00+09:00"
+
+
+@pytest.mark.parametrize(
+    ("source", "deadline"),
+    [
+        ("금일 자정부터", "2026-10-01T00:00:00+09:00"),
+        ("금일 6시부터", "2026-09-30T06:00:00+09:00"),
+    ],
+)
+def test_submission_start_time_is_not_saved_as_a_deadline(source, deadline):
+    with pytest.raises(AiClientError):
+        parse_notice_analysis(
+            analysis_json(
+                deadline_at=deadline,
+                deadline_source_text=source,
+            ),
+            f"제출 시작은 {source}입니다.",
+            POSTED_AT,
+        )
 
 
 def test_date_only_quote_cannot_hide_explicit_time_on_same_line():
@@ -414,6 +506,27 @@ def test_geumil_without_time_defaults_to_end_of_korean_posting_day():
         datetime.fromisoformat("2026-09-14T16:00:00+00:00"),
     )
     assert result.deadline_at.isoformat() == "2026-09-15T23:59:00+09:00"
+
+
+def test_geumil_midnight_until_deadline_is_next_day_midnight():
+    notice_text = (
+        "실습 결과는 아래 설문 링크를 통해서 제출해 주세요.\n\n"
+        "제출 기한은 금일 자정까지, 제출 파일명은 "
+        "고유번호_이름_RAG-Pipeline.ipynb (예: G123_홍길동_RAG-Pipeline.ipynb) 입니다.\n\n"
+        "제출 파일명 규칙에 맞춰서 과제 제출 기한 내 제출해 주세요."
+    )
+    posted_at = datetime(2026, 9, 30, 15, 46, 47, tzinfo=SEOUL)
+
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at="2026-10-01T00:00:00+09:00",
+            deadline_source_text="금일 자정까지",
+        ),
+        notice_text,
+        posted_at,
+    )
+
+    assert result.deadline_at == datetime(2026, 10, 1, 0, 0, tzinfo=SEOUL)
 
 
 def test_date_quote_cannot_hide_time_on_another_line():
