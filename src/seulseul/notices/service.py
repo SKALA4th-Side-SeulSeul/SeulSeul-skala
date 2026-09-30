@@ -22,7 +22,7 @@ from seulseul.notices.repository import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_STORED_NOTICES = 50
-NOTICE_URL_KEYWORDS = ("form", "docs")
+NOTICE_URL_HOST_LABELS = frozenset(("form", "forms", "docs"))
 URL_PATTERN = re.compile(r"https?://[^\s<>|]+", re.IGNORECASE)
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
@@ -53,8 +53,8 @@ def extract_notice_urls(text: str) -> tuple[tuple[str, str], ...]:
                 continue
         except ValueError:
             continue
-        searchable_part = f"{parsed.hostname or ''}{parsed.path}".lower()
-        if not any(keyword in searchable_part for keyword in NOTICE_URL_KEYWORDS):
+        hostname_labels = (parsed.hostname or "").lower().rstrip(".").split(".")
+        if not NOTICE_URL_HOST_LABELS.intersection(hostname_labels):
             continue
         canonical_url = canonicalize_url(original_url)
         if canonical_url in seen:

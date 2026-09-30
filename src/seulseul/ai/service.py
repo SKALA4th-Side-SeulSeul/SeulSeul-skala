@@ -5,7 +5,7 @@ import math
 import re
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -25,6 +25,10 @@ MAX_ANALYSIS_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (2.0, 8.0)
 SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
 REQUIRED_ANALYSIS_FIELDS = frozenset({"title", "summary", "deadline_at", "deadline_source_text"})
+ISO_24_HOUR_PATTERN = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})(?P<separator>T| )24:00"
+    r"(?P<seconds>:00(?:\.0+)?)?(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
+)
 DEADLINE_CONTEXT = re.compile(
     r"마감|기한|제출|신청|접수|등록|응답|참여|확인|완료|예약|deadline|due|submit|apply",
     re.IGNORECASE,
@@ -62,6 +66,8 @@ deadline_source_text에는 날짜와 직접 연결된 시간 표현을 함께 �
 
 시간대는 Asia/Seoul을 사용한다. `deadline_at`은 반드시 `+09:00` 오프셋을 포함한
 ISO 8601 시각(예: `2026-09-30T18:00:00+09:00`)으로 반환한다. 시각이 없으면 23:59로 정한다.
+`deadline_at`에는 `T24:00`을 사용하지 말고, 24:00·자정은 다음 날
+`T00:00:00+09:00`으로 반환한다.
 연도가 없으면 Slack 게시일의 연도를 사용하고, 상대 날짜는 Slack 게시 시각을 기준으로 계산한다.
 "금일"은 "오늘"과 같으며 한국 시간 기준 Slack 최초 게시일의 당일이다.
 "자정까지"는 해당 날짜의 24:00, 즉 다음 날 00:00으로 계산한다. 날짜 경계가
@@ -172,7 +178,7 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         raise AiClientError("AI 제목이 DB 저장 한도 255자를 초과했습니다.")
 
     try:
-        deadline_at = datetime.fromisoformat(values["deadline_at"])
+        deadline_at = _parse_iso_deadline(values["deadline_at"])
     except ValueError as error:
         raise AiClientError(
             "AI 응답의 deadline_at을 ISO 8601 시각으로 해석할 수 없습니다."
@@ -226,6 +232,21 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
         deadline_at=deadline_at,
         deadline_source_text=values["deadline_source_text"],
     )
+
+
+def _parse_iso_deadline(value: str) -> datetime:
+    """Python이 읽지 못하는 ISO 8601의 24:00을 다음 날 00:00으로 보정한다."""
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        match = ISO_24_HOUR_PATTERN.fullmatch(value)
+        if match is None:
+            raise
+        normalized_value = (
+            f"{match.group('date')}{match.group('separator')}00:00"
+            f"{match.group('seconds') or ''}{match.group('offset') or ''}"
+        )
+        return datetime.fromisoformat(normalized_value) + timedelta(days=1)
 
 
 def _try_expected_deadline(evidence: str, posted_at: datetime) -> datetime | None:
