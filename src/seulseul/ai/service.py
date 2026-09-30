@@ -10,7 +10,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from seulseul.ai.client import MAX_RETRY_AFTER_SECONDS, AiClientError, ChatClient
-from seulseul.ai.deadline import CLOCK, DATE, RELATIVE, expected_deadline
+from seulseul.ai.deadline import (
+    expected_deadline,
+    find_date_expressions,
+    has_explicit_year,
+    has_time_expression,
+    parse_time_expressions,
+    time_expression_count,
+)
 from seulseul.ai.model import NoticeAnalysis
 
 MAX_NOTICE_INPUT_CHARS = 12_000
@@ -22,8 +29,12 @@ DEADLINE_CONTEXT = re.compile(
     r"마감|기한|제출|신청|접수|등록|응답|참여|확인|완료|예약|deadline|due|submit|apply",
     re.IGNORECASE,
 )
+STRONG_DEADLINE_CONTEXT = re.compile(
+    r"마감|기한|제출|신청|접수|등록|응답|참여|확인|완료|예약|deadline|due|submit|apply",
+    re.IGNORECASE,
+)
 SCHEDULE_CONTEXT = re.compile(
-    r"시간표|타임테이블|time\s*table|행사|진행|시작|종료|일정",
+    r"시간표|타임테이블|time\s*table|행사|진행|시작|종료|발표|부터",
     re.IGNORECASE,
 )
 
@@ -36,7 +47,9 @@ ANALYSIS_SYSTEM_PROMPT = """\
 신청 마감과 행사 일시가 모두 있으면 신청 마감을 우선한다.
 신청·제출 마감이 없을 때만 행사 진행 일시를 deadline_at으로 선택한다.
 변경 전과 변경 후가 함께 있으면 변경 후의 일정을 선택한다.
-deadline_source_text는 원문에 연속해서 존재하는 마감 날짜 또는 날짜·시각 표현만 반환한다.
+deadline_source_text에는 날짜와 직접 연결된 시간 표현을 함께 인용한다.
+날짜와 시간이 서로 다른 줄에 있더라도 각각 마감 문맥으로 직접 연결되어 있으면
+두 원문 표현을 함께 인용한다.
 "변경 후"나 "신청 마감" 같은 라벨을 날짜·시각 앞에 덧붙이지 않는다.
 반드시 설명이나 Markdown 없이 다음 키를 가진 JSON 객체 하나만 반환한다.
 
@@ -51,6 +64,11 @@ deadline_source_text는 원문에 연속해서 존재하는 마감 날짜 또는
 ISO 8601 시각(예: `2026-09-30T18:00:00+09:00`)으로 반환한다. 시각이 없으면 23:59로 정한다.
 연도가 없으면 Slack 게시일의 연도를 사용하고, 상대 날짜는 Slack 게시 시각을 기준으로 계산한다.
 "금일"은 "오늘"과 같으며 한국 시간 기준 Slack 최초 게시일의 당일이다.
+"자정까지"는 해당 날짜의 24:00, 즉 다음 날 00:00으로 계산한다. 날짜 경계가
+모호한 "자정"만 있는 경우에는 deadline_source_text에 "자정까지" 또는 "24:00"을 포함한다.
+밤·저녁·새벽·아침, 오전·오후, 시 반, AM/PM, 초 단위, 명일·익일·내일모레·N일 뒤·월말 같은
+원문 표현도 그대로 해석한다. 지원하지 않거나 의미가 모호한 날짜·시간은 23:59 또는 다른 시각으로
+추측하지 말고 분석을 실패시킨다.
 마감일은 정확히 하나여야 한다. deadline_source_text에는 선택한 마감 표현을 원문에서 인용한다.
 마감 표현 자체에 시각이 있으면 날짜와 시각을 함께 인용하고, 날짜만 있는 마감이면 날짜만 인용한다.
 공지에 포함된 시간표·행사 진행 시각은 마감 시각으로 사용하거나 deadline_source_text에 섞지 않는다.
@@ -175,9 +193,7 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
     if _has_related_deadline_time(notice_text, evidence):
         raise AiClientError("마감 표현에 시각이 있으므로 날짜와 시각을 함께 인용해야 합니다.")
     evidence_without_urls = re.sub(r"https?://[^\s<>|]+", "", evidence)
-    evidence_date_expressions = list(DATE.finditer(evidence_without_urls)) + list(
-        RELATIVE.finditer(evidence_without_urls)
-    )
+    evidence_date_expressions = find_date_expressions(evidence_without_urls)
     if not evidence_date_expressions:
         raise AiClientError("AI 마감 근거에 날짜가 없습니다.")
     evidence_expected = _try_expected_deadline(evidence, posted_at)
@@ -187,9 +203,7 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
     if not source_candidates:
         raise AiClientError("AI가 반환한 마감 날짜·시간이 공지 원문에서 확인되지 않습니다.")
     posted_at_seoul = posted_at.astimezone(SEOUL_TIMEZONE)
-    if deadline_at not in source_candidates and not any(
-        match.group("year") for match in DATE.finditer(evidence_without_urls)
-    ):
+    if deadline_at not in source_candidates and not has_explicit_year(evidence_without_urls):
         repaired_candidates = [
             candidate
             for candidate in source_candidates
@@ -199,6 +213,8 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
             # 원문에 연도가 없으면 Slack 게시 연도를 사용한다는 제품 규칙을 적용한다.
             # 소형 모델이 날짜·시각은 맞추고 학습 데이터의 과거 연도만 붙이는 경우를 보정한다.
             deadline_at = repaired_candidates[0]
+    if evidence_expected is not None and deadline_at != evidence_expected:
+        raise AiClientError("AI가 반환한 deadline_at이 인용 근거와 일치하지 않습니다.")
     if deadline_at < posted_at_seoul:
         raise AiClientError("AI가 추출한 마감일이 Slack 게시 시각보다 과거입니다.")
     if deadline_at not in source_candidates:
@@ -215,9 +231,7 @@ def parse_notice_analysis(raw_output: str, notice_text: str, posted_at: datetime
 def _try_expected_deadline(evidence: str, posted_at: datetime) -> datetime | None:
     """날짜가 하나로 식별되는 AI 근거만 독립적으로 계산한다."""
     evidence_without_urls = re.sub(r"https?://[^\s<>|]+", "", evidence)
-    date_expressions = list(DATE.finditer(evidence_without_urls)) + list(
-        RELATIVE.finditer(evidence_without_urls)
-    )
+    date_expressions = find_date_expressions(evidence_without_urls)
     if len(date_expressions) != 1:
         return None
     try:
@@ -229,26 +243,54 @@ def _try_expected_deadline(evidence: str, posted_at: datetime) -> datetime | Non
 def _source_deadline_candidates(notice_text: str, posted_at: datetime) -> set[datetime]:
     """원문에서 독립적으로 계산 가능한 날짜·시각 후보를 반환한다."""
     source_without_urls = re.sub(r"https?://[^\s<>|]+", "", notice_text)
+    lines = [line.strip() for line in source_without_urls.splitlines() if line.strip()]
     candidates: set[datetime] = set()
-    snippets: set[str] = set()
+    strong_candidates: set[datetime] = set()
+    has_strong_deadline_context = any(_is_strong_deadline_line(line) for line in lines)
+    date_only_lines: list[str] = []
+    time_only_lines: list[str] = []
 
-    date_expressions = list(DATE.finditer(source_without_urls)) + list(
-        RELATIVE.finditer(source_without_urls)
-    )
-    clock_expressions = list(CLOCK.finditer(source_without_urls))
-    if len(date_expressions) == 1 and len(clock_expressions) <= 1:
-        snippets.add(source_without_urls)
-
-    for line in source_without_urls.splitlines():
-        line_date_expressions = list(DATE.finditer(line)) + list(RELATIVE.finditer(line))
-        if len(line_date_expressions) == 1 and len(list(CLOCK.finditer(line))) <= 1:
-            snippets.add(line)
-
-    for snippet in snippets:
+    def add_candidate(snippet: str, *, strong: bool) -> None:
         try:
-            candidates.add(expected_deadline(snippet, posted_at))
+            candidate = expected_deadline(snippet, posted_at)
         except AiClientError:
+            return
+        candidates.add(candidate)
+        if strong:
+            strong_candidates.add(candidate)
+
+    source_dates = find_date_expressions(source_without_urls)
+    source_time_count = time_expression_count(source_without_urls)
+    if len(source_dates) == 1 and source_time_count <= 1:
+        add_candidate(source_without_urls, strong=_is_strong_deadline_line(source_without_urls))
+
+    for line in lines:
+        if _is_submission_start_line(line):
             continue
+        line_dates = find_date_expressions(line)
+        line_time_count = time_expression_count(line)
+        if len(line_dates) == 1 and line_time_count <= 1:
+            strong = _is_strong_deadline_line(line)
+            add_candidate(line, strong=strong)
+            if line_time_count == 0 and strong:
+                date_only_lines.append(line)
+        elif not line_dates and line_time_count == 1 and _is_strong_deadline_line(line):
+            time_only_lines.append(line)
+
+    # 날짜와 시간이 분리된 공지에서는 두 표현이 모두 마감 문맥일 때만 결합한다.
+    # 행사·발표 시각을 날짜와 임의로 조합하지 않도록 강한 마감 라벨만 사용한다.
+    if len(date_only_lines) == 1 and len(time_only_lines) == 1:
+        add_candidate(f"{date_only_lines[0]} {time_only_lines[0]}", strong=True)
+        try:
+            date_only_candidate = expected_deadline(date_only_lines[0], posted_at)
+        except AiClientError:
+            date_only_candidate = None
+        if date_only_candidate is not None:
+            candidates.discard(date_only_candidate)
+            strong_candidates.discard(date_only_candidate)
+
+    if has_strong_deadline_context:
+        return strong_candidates
     return candidates
 
 
@@ -290,12 +332,33 @@ def _has_related_deadline_time(notice_text: str, evidence: str) -> bool:
 
 def _contains_time_expression(text: str) -> bool:
     """한국어 시각 또는 명시적인 정오·자정 표현이 있는지 확인한다."""
-    return bool(CLOCK.search(text) or re.search(r"정오|자정", text))
+    return has_time_expression(text)
 
 
 def _looks_like_schedule_line(line: str) -> bool:
     """두 시각 범위나 시간표 문맥을 마감 시각 후보에서 제외한다."""
-    return bool(SCHEDULE_CONTEXT.search(line)) or len(list(CLOCK.finditer(line))) >= 2
+    if SCHEDULE_CONTEXT.search(line):
+        return True
+    try:
+        return len(parse_time_expressions(line)) >= 2
+    except AiClientError:
+        # 미해석 시각은 일정 범위가 아니라 검증 실패 사유다. 후보에서 제외하되
+        # 강한 마감 문맥이 있다는 사실은 유지해 행사 시각으로 대체하지 않는다.
+        return False
+
+
+def _is_strong_deadline_line(line: str) -> bool:
+    """제출·마감 문맥을 행사 시작 시각과 구분한다."""
+    return (
+        bool(STRONG_DEADLINE_CONTEXT.search(line))
+        and not _is_submission_start_line(line)
+        and not _looks_like_schedule_line(line)
+    )
+
+
+def _is_submission_start_line(line: str) -> bool:
+    """제출·신청의 시작 시각을 마감 후보로 저장하지 않는다."""
+    return bool(DEADLINE_CONTEXT.search(line) and re.search(r"시작|개시|부터", line))
 
 
 def _same_month_day_and_time(first: datetime, second: datetime) -> bool:
