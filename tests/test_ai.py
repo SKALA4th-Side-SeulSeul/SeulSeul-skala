@@ -175,6 +175,7 @@ def test_analyzer_returns_validated_json_result() -> None:
     assert "[공지 원문 끝]" in client.calls[0][1]
     assert "메타데이터 문구를 사용하지 않는다" in client.calls[0][0]
     assert '"자정까지"는 해당 날짜의 24:00' in client.calls[0][0]
+    assert "`deadline_at`에는 `T24:00`을 사용하지 말고" in client.calls[0][0]
     assert (
         "신청 폼·제출 폼·등록 링크가 있으면 신청·제출·등록 마감을 deadline_at으로 선택한다."
         in client.calls[0][0]
@@ -375,6 +376,27 @@ def test_explicit_and_relative_deadlines_match_source(source, deadline):
         analysis_json(deadline_source_text=source, deadline_at=deadline), source, POSTED_AT
     )
     assert result.deadline_at.isoformat() == deadline
+
+
+@pytest.mark.parametrize(
+    "deadline_at",
+    [
+        "2026-09-30T24:00+09:00",
+        "2026-09-30T24:00:00+09:00",
+        "2026-09-30T24:00:00.000+09:00",
+    ],
+)
+def test_iso_24_hour_deadline_is_normalized_to_next_day_midnight(deadline_at):
+    result = parse_notice_analysis(
+        analysis_json(
+            deadline_at=deadline_at,
+            deadline_source_text="금일 24:00",
+        ),
+        "마감 : 금일 24:00",
+        COMMON_PHRASE_POSTED_AT,
+    )
+
+    assert result.deadline_at == datetime(2026, 10, 1, 0, 0, tzinfo=SEOUL)
 
 
 @pytest.mark.parametrize(

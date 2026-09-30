@@ -585,6 +585,30 @@ def test_extract_notice_urls_supports_form_and_docs_links_only() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://wikidocs.net/331292",
+        "https://www.wikidocs.net/331292",
+        "https://example.test/reference/docs",
+    ],
+)
+def test_extract_notice_urls_ignores_non_submission_document_references(url: str) -> None:
+    assert extract_notice_urls(f"참고 링크 {url}") == ()
+
+
+def test_extract_notice_urls_keeps_google_document_and_form_links() -> None:
+    text = "문서 https://docs.google.com/document/d/example/edit 폼 https://forms.gle/example"
+
+    assert extract_notice_urls(text) == (
+        (
+            "https://docs.google.com/document/d/example/edit",
+            "https://docs.google.com/document/d/example/edit",
+        ),
+        ("https://forms.gle/example", "https://forms.gle/example"),
+    )
+
+
 def test_canonicalize_url_removes_query_fragment_and_trailing_slash() -> None:
     assert (
         canonicalize_url("HTTPS://Forms.Example.Test/task/?utm_source=slack#section")
@@ -615,10 +639,17 @@ def test_other_bot_message_is_allowed() -> None:
     assert parse_notice_event(event, {ALLOWED_CHANNEL}, "USEULSEUL").kind == "created"
 
 
-def test_message_without_matching_url_is_ignored() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        "일반 안내 https://example.test/page",
+        "랭그래프 참고 링크 https://wikidocs.net/331292",
+    ],
+)
+def test_message_without_matching_url_is_ignored(text: str) -> None:
     service = NoticeService({ALLOWED_CHANNEL})
 
-    assert record(service, channel_message(text="일반 안내 https://example.test/page")) == []
+    assert record(service, channel_message(text=text)) == []
     assert service.recent_notices(5) == []
 
 
