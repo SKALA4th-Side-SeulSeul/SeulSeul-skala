@@ -18,7 +18,7 @@ menu_labels=(
 )
 menu_descriptions=(
     'AI 분석에 실패해 학생 체크리스트에 반영되지 못한 공지를 다시 분석합니다. 번호는 공지 패널의 "처리가 필요한 공지" 번호입니다.'
-    '봇이 읽지 못하는 채널의 공지를 등록하거나, AI가 잘못 뽑은 제목·마감일을 직접 고치거나, 공지를 삭제합니다. 저장 전에 항상 확인합니다.'
+    '봇이 없는 채널의 공지를 등록하거나, AI가 잘못 뽑은 제목·마감일을 고치거나, 공지를 삭제합니다. 원문은 이 메뉴를 연 뒤 붙여 넣고 .done으로 끝냅니다.'
     'Slack에서 받았지만 아직 체크리스트에 반영되지 않은 원본입니다. 잠시 뒤 사라지면 정상이고, 계속 남으면 원문을 확인하세요.'
     '봇이 지금 무엇을 하는지 실시간으로 봅니다. 오류는 빨간색, 주의는 노란색입니다. Ctrl+C를 누르면 돌아옵니다.'
     '공지 패널에서 잘린 목록과 차트를 한 화면에 모두 펼쳐 봅니다.'
@@ -45,12 +45,14 @@ menu_find() {
 menu_pause() {
     local ignored
     echo
+    ui_drain_input || true
     IFS= read -r -p '  Enter를 누르면 돌아갑니다: ' ignored || true
 }
 
 # 입력을 받는다. EOF(Ctrl+D)면 실패를 돌려 취소로 처리한다.
 menu_read() {
     local variable="$1" prompt="$2" value
+    ui_drain_input || true
     if ! IFS= read -r -p "  $prompt" value; then
         echo
         return 1
@@ -67,6 +69,10 @@ run_tool() {
     trap 'echo' INT
     bash "$@" || tool_status=$?
     eval "${previous:-trap - INT}"
+    # 작업이 끝난 뒤 남은 입력(붙여넣기 나머지 줄 등)이 메뉴로 흘러가지 않게 버린다.
+    if ui_drain_input; then
+        ui_info '작업이 끝난 뒤 남아 있던 입력은 무시했습니다.'
+    fi
     if [[ $tool_status -ne 0 ]]; then
         echo
         ui_warn '작업이 끝나지 않았거나 실패했습니다. 위 안내를 확인하세요.'

@@ -60,9 +60,23 @@ ui_usage_row() { printf '  %s%-36s%s %s\n' "$ui_cyan" "$1" "$ui_reset" "$2"; }
 # 메뉴 항목: 번호와 할 일.
 ui_menu_item() { printf '    %s%s%s  %s\n' "$ui_bold" "$1" "$ui_reset" "$2"; }
 
+# 붙여넣기·연타처럼 이미 도착해 있는 키 입력을 버린다. 버린 입력이 있으면 0을 돌려준다.
+# 이전 작업에서 남은 붙여넣기 줄이 다음 질문(확인·메뉴 선택)의 답으로 들어가는 것을 막는다.
+# 터미널일 때만 동작하며, 비정규 모드로 0.1초 동안 새 입력이 없을 때까지 읽어 버린 뒤 원래 모드로 돌린다.
+ui_drain_input() {
+    local mode count
+    [[ -t 0 ]] || return 1
+    mode="$(stty -g 2>/dev/null)" || return 1
+    stty -icanon min 0 time 1 2>/dev/null || return 1
+    count="$(cat | wc -c)"
+    stty "$mode" 2>/dev/null || true
+    ((count > 0))
+}
+
 # y를 입력해야만 0을 반환한다. Enter·EOF·그 밖의 입력은 모두 취소다.
 ui_confirm() {
     local answer
+    ui_drain_input || true
     if ! IFS= read -r -p "  $1 [y/N]: " answer; then
         echo
         return 1

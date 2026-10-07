@@ -79,6 +79,9 @@ fi
 if [[ -f emit-output && "$*" == *' run --rm '* ]]; then
     cat emit-output
 fi
+if [[ -f slow-console && "$*" == *manual_console* ]]; then
+    sleep 1
+fi
 if [[ -f emit-stderr && "$*" == *manual_console* ]]; then
     printf 'console screen\n'
     cat emit-stderr >&2
@@ -760,10 +763,14 @@ class Terminal:
                     return
                 self.output += chunk
 
-    def expect(self, text, *, count=1, timeout=10):
+    def mark(self):
+        """현재 출력 위치. 콘솔은 1초마다 다시 그리므로 이후에 나온 화면을 기다릴 때 쓴다."""
+        return len(self.output)
+
+    def expect(self, text, *, count=1, after=0, timeout=10):
         needle = text.encode()
         deadline = time.monotonic() + timeout
-        while self.output.count(needle) < count:
+        while self.output[after:].count(needle) < count:
             if time.monotonic() > deadline:
                 screen = self.output.decode(errors="replace")[-3000:]
                 raise AssertionError(f"{text!r} 미표시:\n{screen}")
@@ -804,8 +811,9 @@ def test_console_opens_full_screen_and_restores_terminal(operations):
     terminal.expect("? 도움말")
     terminal.send("?")
     terminal.expect("공지 상태 용어")
+    returned = terminal.mark()
     terminal.send("x")
-    terminal.expect("슬슬 관리 콘솔", count=2)
+    terminal.expect("슬슬 관리 콘솔", after=returned)
     terminal.send("q")
     assert terminal.finish() == 0
     assert b"\x1b[?1049h" in terminal.output
@@ -823,8 +831,9 @@ def test_console_number_key_asks_before_backup(operations):
     terminal.send("\n")
     terminal.expect("취소했습니다.")
     terminal.expect("Enter를 누르면 돌아갑니다")
+    returned = terminal.mark()
     terminal.send("\n")
-    terminal.expect("슬슬 관리 콘솔", count=2)
+    terminal.expect("슬슬 관리 콘솔", after=returned)
     assert not terminal.line_mode()
     assert not any("exec pg_dump" in call for call in calls())
     terminal.send("7")
@@ -832,8 +841,9 @@ def test_console_number_key_asks_before_backup(operations):
     terminal.send("y\n")
     terminal.expect("백업 완료:")
     terminal.expect("Enter를 누르면 돌아갑니다", count=2)
+    returned = terminal.mark()
     terminal.send("\n")
-    terminal.expect("슬슬 관리 콘솔", count=3)
+    terminal.expect("슬슬 관리 콘솔", after=returned)
     terminal.send("q")
     assert terminal.finish() == 0
     assert any("exec pg_dump" in call for call in calls())
@@ -844,12 +854,13 @@ def test_console_arrow_keys_select_and_enter_runs(operations):
     terminal = Terminal(repo)
     terminal.expect("슬슬 관리 콘솔")
     terminal.send("\x1b[B")
-    terminal.expect("봇이 읽지 못하는 채널의 공지를 등록하거나")
+    terminal.expect("봇이 없는 채널의 공지를 등록하거나")
     terminal.send("\n")
     terminal.expect("Enter를 누르면 돌아갑니다")
     assert any("seulseul.notices.manual_console --limit 100" in call for call in calls())
+    returned = terminal.mark()
     terminal.send("\n")
-    terminal.expect("슬슬 관리 콘솔", count=2)
+    terminal.expect("슬슬 관리 콘솔", after=returned)
     terminal.send("q")
     assert terminal.finish() == 0
 
@@ -859,6 +870,8 @@ def test_small_window_or_simple_flag_uses_line_menu(operations, args, size):
     repo, _, _ = operations
     terminal = Terminal(repo, *args, rows=size[0], cols=size[1])
     terminal.expect("무엇을 할까요? 번호를 입력하세요")
+    # 프롬프트 직전에 남은 입력을 비우므로 프롬프트가 보인 뒤에 입력한다.
+    terminal.expect("선택: ")
     terminal.send("q\n")
     assert terminal.finish() == 0
     assert b"\x1b[?1049h" not in terminal.output
@@ -881,8 +894,9 @@ def test_console_failed_action_returns_to_console(operations):
     terminal.send("2")
     terminal.expect("작업이 끝나지 않았거나 실패했습니다")
     terminal.expect("Enter를 누르면 돌아갑니다")
+    returned = terminal.mark()
     terminal.send("\n")
-    terminal.expect("슬슬 관리 콘솔", count=2)
+    terminal.expect("슬슬 관리 콘솔", after=returned)
     terminal.send("q")
     assert terminal.finish() == 0
 
@@ -1001,3 +1015,40 @@ def test_view_manual_logs_are_readable_and_raw_is_available(operations):
     assert "정상 | 운영자 | 수동 공지 등록 완료 · 배정 2반" in result.stdout
     raw = run("view.sh", "logs", "manual", "--raw")
     assert "error=ValueError" in raw.stdout
+
+
+@pytest.mark.parametrize("burst", ["1234\n", "7y\n"])
+def test_console_ignores_pasted_burst_instead_of_running_menu(operations, burst):
+    # 붙여 넣은 글의 숫자·y가 메뉴 실행이나 확인 답으로 쓰이면 안 된다.
+    repo, _, calls = operations
+    terminal = Terminal(repo)
+    terminal.expect("슬슬 관리 콘솔")
+    terminal.send(burst)
+    terminal.expect("붙여 넣은 입력은 메뉴에서 무시했습니다")
+    terminal.send("q")
+    assert terminal.finish() == 0
+    assert not any("seulseul.notices.retry" in call for call in calls())
+    assert not any("exec pg_dump" in call for call in calls())
+
+
+def test_console_discards_input_left_after_action_and_still_waits(operations):
+    # 작업 중 붙여 넣은 줄이 "Enter를 누르면 돌아갑니다"를 대신 넘기거나 메뉴로 흘러가지 않는다.
+    repo, _, calls = operations
+    (repo / "slow-console").touch()
+    terminal = Terminal(repo)
+    terminal.expect("슬슬 관리 콘솔")
+    terminal.send("2")
+    terminal.expect("슬슬 공지 관리")
+    terminal.send("남은 원문 1\n남은 원문 2\n")
+    terminal.expect("작업이 끝난 뒤 남아 있던 입력은 무시했습니다")
+    waiting = terminal.mark()
+    terminal.expect("Enter를 누르면 돌아갑니다")
+    terminal._drain(1)
+    # 남은 줄이 Enter를 대신하지 않았으므로 콘솔로 돌아가지 않고 계속 기다리고 있어야 한다.
+    assert "슬슬 관리 콘솔".encode() not in terminal.output[waiting:]
+    returned = terminal.mark()
+    terminal.send("\n")
+    terminal.expect("슬슬 관리 콘솔", after=returned)
+    terminal.send("q")
+    assert terminal.finish() == 0
+    assert sum("manual_console" in call for call in calls()) == 1

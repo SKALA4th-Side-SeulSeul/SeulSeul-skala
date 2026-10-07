@@ -42,6 +42,8 @@ service_text=''
 service_plain=''
 backup_text=''
 backup_plain=''
+console_notice=''
+console_notice_until=0
 saved_stty="$(stty -g 2>/dev/null || true)"
 
 enter_screen() {
@@ -310,8 +312,14 @@ draw() {
         frame+="$line$cell_result"$'\033[K\n'
     done
     wrap_description "[${menu_groups[selected]}] ${menu_descriptions[selected]}" $((cols - 4))
-    frame+=" ${c_dim}┆${c_reset} ${description_lines[0]}"$'\033[K\n'
-    frame+=" ${c_dim}┆${c_reset} ${description_lines[1]:-}"$'\033[K\n'
+    if [[ -n "$console_notice" ]] && ((SECONDS < console_notice_until)); then
+        ui_cell "$console_notice" $((cols - 4))
+        frame+=" ${c_yellow}⚠${c_reset} ${ui_cell_result}"$'\033[K\n'
+        frame+=" ${c_dim}┆${c_reset} ${description_lines[0]}"$'\033[K\n'
+    else
+        frame+=" ${c_dim}┆${c_reset} ${description_lines[0]}"$'\033[K\n'
+        frame+=" ${c_dim}┆${c_reset} ${description_lines[1]:-}"$'\033[K\n'
+    fi
     bar_line ' ? 도움말   Enter 실행   1~0 바로 실행   r 새로고침   q 종료' ''
     frame+="$bar_result"$'\033[K'
     printf '\033[H%s' "$frame"
@@ -352,6 +360,7 @@ run_selected() {
     leave_screen
     printf '\033[H\033[2J'
     menu_run "${menu_keys[selected]}" || true
+    ui_drain_input || true
     enter_screen
     service_checked_at=-$service_interval
     notice_loaded_at=-$notice_interval
@@ -376,10 +385,19 @@ while true; do
         [[ -t 0 ]] || exit 0
         continue
     fi
+    if [[ "$key" == $'\033' ]]; then
+        sequence=''
+        IFS= read -rsn2 -t 1 sequence || true
+    fi
+    # 붙여넣기처럼 키가 한꺼번에 들어오면 글자를 메뉴 명령으로 실행하지 않는다.
+    if ui_drain_input; then
+        console_notice='붙여 넣은 입력은 메뉴에서 무시했습니다. 공지 원문은 2번 메뉴를 연 뒤 붙여 넣으세요.'
+        console_notice_until=$((SECONDS + 6))
+        continue
+    fi
+    console_notice=''
     case "$key" in
         $'\033')
-            sequence=''
-            IFS= read -rsn2 -t 1 sequence || true
             case "$sequence" in
                 '[A') selected=$(((selected + 9) % 10)) ;;
                 '[B') selected=$(((selected + 1) % 10)) ;;
