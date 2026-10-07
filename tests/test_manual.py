@@ -326,3 +326,53 @@ def test_interactive_cli_rejects_invalid_limit_before_loading_settings(argument,
         manual_edit.main(["--limit", argument])
     assert error.value.code == 2
     load.assert_not_called()
+
+
+def test_manual_cli_target_channel_rules():
+    import pytest
+
+    from seulseul.notices.manual import target_channel
+    from seulseul.notices.service import NoticeRetryError
+
+    allowed = ("C123ABC4567", "C2CLASS0002")
+    assert target_channel("C123ABC4567", None, allowed) == "C123ABC4567"
+    assert target_channel("C0NOBOT0001", "C2CLASS0002", allowed) == "C2CLASS0002"
+    with pytest.raises(NoticeRetryError, match="--target-channel-id로 학생 배정 기준"):
+        target_channel("C0NOBOT0001", None, allowed)
+    with pytest.raises(NoticeRetryError, match="설정된 공지 채널이어야"):
+        target_channel("C0NOBOT0001", "C9UNKNOWN99", allowed)
+    with pytest.raises(NoticeRetryError, match="이미 공지 채널 설정에"):
+        target_channel("C123ABC4567", "C2CLASS0002", allowed)
+
+
+def test_manual_cli_reports_workspace_lookup_failure(monkeypatch, capsys, caplog):
+    from seulseul.checklists.model import ChecklistDeliveryError
+    from seulseul.notices import manual
+
+    class FakeSettings:
+        bot_token = "xoxb-test"
+        notice_channels = ("C123ABC4567",)
+        manual_notice_channels = ()
+
+    class Offline:
+        def workspace_id(self):
+            raise ChecklistDeliveryError("slack_connection_error")
+
+    monkeypatch.setattr(manual, "configure_logging", lambda: None)
+    monkeypatch.setattr(manual, "load_slack_settings", lambda: FakeSettings())
+    monkeypatch.setattr(
+        manual.SlackChecklistClient, "from_token", classmethod(lambda cls, token: Offline())
+    )
+
+    with caplog.at_level("ERROR", logger="seulseul.notices.manual"):
+        result = manual.main(
+            [
+                "delete",
+                "--source-url",
+                "https://workspace.slack.com/archives/C123ABC4567/p1789559318987269",
+            ]
+        )
+
+    assert result == 1
+    assert "자동으로 확인하지 못했습니다(slack_connection_error)" in capsys.readouterr().out
+    assert "수동 공지 처리 실패: action=delete stage=CLI" in caplog.text

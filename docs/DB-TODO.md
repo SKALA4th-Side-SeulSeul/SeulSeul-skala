@@ -174,9 +174,9 @@ PostgreSQL과 Docker Compose의 환경별 작업·운영 기록입니다. 현재
 
 ### 2-5. 운영
 
-- [x] 수동 운영 백업 `./backup.sh`: custom-format pg_dump, private 파일 권한, 전체 해독 검사·SHA-256, 실패 시 부분 파일 정리 및 이전 백업 보존 (실제 서버 실행·복구 시험은 별도)
+- [x] 수동 운영 백업 `./admin.sh backup`(D-041 이전 `./backup.sh`): custom-format pg_dump, private 파일 권한, 전체 해독 검사·SHA-256, 실패 시 부분 파일 정리 및 이전 백업 보존 (실제 서버 실행·복구 시험은 별도)
 
-- [x] 자동 백업 등록·해제 스크립트 `backup_run.sh`·`backup_stop.sh`: 한국 시간 매일 03시, systemd 사용자 타이머·lingering, 중단 기간 보충 실행. 상세 사용법은 README의 운영 DB 백업 참고
+- [x] 자동 백업 등록·해제 명령 `./admin.sh backup schedule`·`unschedule`(D-041에서 기존 `backup_run.sh`·`backup_stop.sh`를 통합): 한국 시간 매일 03시, systemd 사용자 타이머·lingering, 중단 기간 보충 실행. 상세 사용법은 README의 운영 DB 백업 참고
 - [ ] 운영 서버에서 자동 백업 등록 후 실제 성공 로그·파일 확인
 - [ ] VM 밖(예: Oracle Object Storage) 보관 및 보존 기간 정책 확정·적용 (현재 자동 삭제 없음)
 - [ ] 백업 복구 시험 1회

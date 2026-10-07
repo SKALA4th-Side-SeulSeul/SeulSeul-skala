@@ -89,7 +89,7 @@ def run_interactive(repository, messenger, *, read=input, pause=time.sleep) -> i
 def main(argv=None) -> int:
     argparse.ArgumentParser(description=__doc__).parse_args(argv)
     if not sys.stdin.isatty():
-        print("터미널에서 ./announce.sh를 실행하세요. 파일·파이프 입력은 지원하지 않습니다.")
+        print("터미널에서 ./admin.sh announce를 실행하세요. 파일·파이프 입력은 지원하지 않습니다.")
         return 1
     try:
         settings = load_slack_settings()

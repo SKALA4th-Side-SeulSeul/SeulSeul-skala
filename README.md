@@ -36,11 +36,23 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 
 운영자가 바로 찾을 명령만 모은 [운영자 명령 빠른 안내](docs/OPERATIONS.md)를 함께 제공합니다.
 
+루트 운영 스크립트는 `admin.sh`·`view.sh`·`run.sh`·`stop.sh` 4개입니다(D-041). **`./admin.sh` 하나만 기억하면 됩니다.** 터미널에서 실행하면 htop처럼 화면 전체를 쓰는 관리 콘솔이 열립니다. 서비스·백업 상태, 공지 상태 분포·7일 마감 차트, 조치가 필요한 공지가 함께 보이고, 화살표·번호로 메뉴를 고르면 아래에 설명이 나옵니다. 공지 재분석·수동 등록·안내 DM·백업·자동 백업·재배포·중지를 모두 메뉴에서 실행합니다. 백업·재처리·재배포·중지는 실행 전에 `y` 확인을 받습니다. 창이 80×24보다 작거나 파이프로 실행하면 같은 메뉴를 줄 단위로 보여 주며, `./admin.sh --simple`로 직접 고를 수도 있습니다.
+
 | 명령 | 동작 |
 | --- | --- |
+| `./admin.sh` | 관리 콘솔 (`↑↓←→` 고르기, `Enter`·번호 실행, `?` 도움말, `r` 새로고침, `q` 종료) |
+| `./admin.sh notice` | 운영 공지 등록·수정·삭제 대화형 메뉴. 봇이 없는 채널도 배정 기준 채널을 골라 등록, 워크스페이스 자동 확인 (`--limit 100`, `--workspace-id T...`) |
+| `./admin.sh retry` | AI 실패 공지와 번호 목록 조회 (대시보드와 같은 번호, 최근 100건 기준) |
+| `./admin.sh retry N` | N번 실패 공지 AI 재처리 |
+| `./admin.sh retry pending` | 미적용 Slack 원본 조회 |
+| `./admin.sh announce` | 현재 가입 학생에게 운영 안내 DM 수동 발송 |
+| `./admin.sh backup` | 운영 DB custom-format 백업·아카이브 해독 검사·SHA-256 생성. 기존 백업 보존 |
+| `./admin.sh backup status` | 자동 백업 예약 상태와 마지막 성공 백업 확인 (조회만) |
+| `./admin.sh backup schedule` | 매일 한국 시간 03:00 자동 백업 등록·재등록 (systemd 사용자 타이머) |
+| `./admin.sh backup unschedule` | 자동 백업 예약 해제. 실행 중인 백업·기존 백업·DB 유지 |
 | `./run.sh setup` | `.env`가 없을 때만 권한 600으로 템플릿 생성. 기존 설정은 보존 |
 | `nano .env` | 운영 환경변수 직접 편집. `APP_ENV=production`, `AI_PROVIDER=nvidia`, DB 주소 `postgres:5432` |
-| `./run.sh` | 이미지 빌드 → 기존 봇·OAuth·ngrok 중지 → DB healthy 대기 → 마이그레이션 → 재생성 |
+| `./run.sh` | 이미지 빌드 → 기존 봇·OAuth·ngrok 중지 → DB healthy 대기 → 마이그레이션 → 재생성. 단계 번호를 보여 주고 실패하면 멈춘 단계를 알려 줍니다 |
 | `./run.sh postgres` | PostgreSQL만 실행·healthy 대기 |
 | `./run.sh migrate` | 빌드·봇·OAuth·ngrok 중지·DB 준비·마이그레이션. 서비스는 중지 상태 유지 |
 | `./stop.sh` | 봇·OAuth·ngrok과 DB를 순서대로 중지, 컨테이너·데이터 볼륨 보존 |
@@ -48,10 +60,8 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | `./stop.sh oauth` | OAuth HTTP 서버와 ngrok만 중지, 봇·DB 유지 |
 | `./stop.sh ngrok` | ngrok만 중지, 봇·OAuth·DB 유지 |
 | `./stop.sh postgres` | DB 중지 전 의존하는 봇도 중지 |
-| `./view.sh` | 전체 컨테이너 상태 (`ps -a`) |
-| `./view.sh dashboard` | 공지 처리 현황·자동 재시도·수동 조치 목록 |
-| `./view.sh dashboard --watch` | 대시보드를 5초마다 갱신 |
-| `./admin.sh` | 대시보드와 번호 선택형 관리자 메뉴 |
+| `./view.sh` | 서비스 상태를 `● 실행 중`·`○ 중지됨`과 역할 설명으로 표시 |
+| `./view.sh dashboard` | 공지 처리 현황·상태 분포·7일 마감 차트·조치 목록 (`--watch`: 5초마다 갱신) |
 | `./view.sh logs` | 봇 최근 100줄을 사람이 읽기 좋게 출력하고 종료 |
 | `./view.sh logs bot --follow` | 봇 최근 100줄 출력 후 실시간 로그 추적 |
 | `./view.sh logs postgres` | PostgreSQL 최근 로그 조회 |
@@ -60,40 +70,37 @@ DBeaver 접속은 [현재 상태와 SSH 터널 절차](docs/DB-ACCESS.md)를 따
 | `./view.sh logs all --follow` | 봇·OAuth·ngrok·DB 로그를 함께 실시간 추적 |
 | `./view.sh logs bot --tail 300` | 봇 과거 로그 300줄 조회 |
 | `./view.sh logs bot --raw` | 봇 원본 로그 조회 |
+| `./view.sh logs manual` | 수동 공지 등록·수정·삭제의 성공·실패 기록 (`--raw`, `--follow`) |
 | `./view.sh db` | 기본 읽기 전용 psql 접속. 종료는 `\q` |
 | `./view.sh schema` | DB 테이블 목록 |
 | `./view.sh config` | 환경변수 값을 출력하지 않고 Compose 구성 검증 |
-| `./notice.sh` | 운영 공지 등록·수정·삭제 대화형 메뉴 |
-| `./retry.sh list` | AI 실패 공지와 번호 목록 조회 |
-| `./retry.sh retry --index N --limit 100` | 번호로 실패 공지 AI 재처리 |
-| `./retry.sh pending --limit 100` | 미적용 Slack 원본 조회 |
-| `./backup.sh` | 운영 DB custom-format 백업·아카이브 해독 검사·SHA-256 생성. 기존 백업 보존 |
-| `./backup_run.sh` | 매일 한국 시간 03:00 자동 백업 등록·재등록 (systemd 사용자 타이머) |
-| `./backup_stop.sh` | 자동 백업 예약 해제. 실행 중인 백업·기존 백업·DB 유지 |
+
+이전의 `./notice.sh`·`./notice_edit.sh`·`./retry.sh`·`./announce.sh`·`./backup.sh`·`./backup_run.sh`·`./backup_stop.sh`는 `./admin.sh`의 메뉴와 하위 명령으로 옮겼습니다. 대응표는 [운영자 명령 빠른 안내](docs/OPERATIONS.md#이전-명령에서-바뀐-점-d-041)에 있습니다. 화면은 터미널에서만 색을 쓰고, 파이프·파일·`NO_COLOR` 환경에서는 기호만 남깁니다.
 
 `view.sh logs`는 기본적으로 최근 로그를 `시각 | 상태 | 주체 | 작업 결과` 형식으로 출력하고 종료합니다. 가입된 학생은 저장된 Slack 성명에서 이름을 표시하며, `/seulseul 시작`과 체크리스트 버튼 작업은 같은 작업자 기준으로 묶어 보여 줍니다. 내부 ID·trace·채널·메시지 시각은 기본 화면에서 숨깁니다. 계속 지켜보려면 `--follow`를 붙이고, 더 오래된 기록은 `--tail N`으로 조회하세요. 원문과 진단 식별자가 필요할 때는 `--raw`를 사용합니다. 각 스크립트의 `--help`로 사용법을 확인할 수 있습니다. 스크립트 위치를 기준으로 실행하므로 다른 작업 디렉터리에서 절대 경로로 실행해도 같은 프로젝트를 사용합니다.
 
 ### 운영 DB 백업
 
-자동 실행은 Ubuntu 운영 서버의 `seulseul` 계정으로 직접 로그인해 `./backup_run.sh`를 실행합니다(`sudo`로 실행하지 않습니다). 같은 명령을 반복해도 타이머는 하나만 유지됩니다. 서버에서 Rootless Docker와 PostgreSQL이 실행 중이어야 합니다. 사용자 기본 소켓 `/run/user/<UID>/docker.sock`을 사용하며 로컬 개발 Docker에는 예약하지 않습니다.
+자동 실행은 Ubuntu 운영 서버의 `seulseul` 계정으로 직접 로그인해 `./admin.sh backup schedule`(관리 콘솔 메뉴 8)을 실행합니다(`sudo`로 실행하지 않습니다). 같은 명령을 반복해도 타이머는 하나만 유지됩니다. 서버에서 Rootless Docker와 PostgreSQL이 실행 중이어야 합니다. 사용자 기본 소켓 `/run/user/<UID>/docker.sock`을 사용하며 로컬 개발 Docker에는 예약하지 않습니다.
 
 - 로그아웃·재부팅 후에도 실행하려면 사용자 lingering이 필요합니다. 꺼져 있으면 등록을 중단하고 `sudo loginctl enable-linger seulseul`을 관리자 계정에서 실행하도록 안내합니다.
-- 매일 **03:00 Asia/Seoul**에 실행합니다. 서버가 꺼져 놓친 예약은 다시 켜졌을 때 한 번 보충합니다. 실행 중에는 같은 타이머 백업이 중복 실행되지 않습니다. 수동 `./backup.sh`와는 별개이므로 함께 실행하지 마세요.
-- 해제: `./backup_stop.sh`. 타이머만 중지·비활성화하며 진행 중인 백업은 끝까지 실행합니다. 다시 등록하면 예약을 재개합니다. 미실행 기간의 보충 백업이 즉시 실행될 수 있습니다.
+- 매일 **03:00 Asia/Seoul**에 실행합니다. 서버가 꺼져 놓친 예약은 다시 켜졌을 때 한 번 보충합니다. 실행 중에는 같은 타이머 백업이 중복 실행되지 않습니다. 수동 `./admin.sh backup`과는 별개이므로 함께 실행하지 마세요.
+- 상태 확인: `./admin.sh backup status`. 예약이 켜져 있는지, 다음 실행 시각, 마지막 성공 백업 시각·크기·보관 개수를 보여 줍니다.
+- 해제: `./admin.sh backup unschedule`. 운영 `.env` 없이도 동작하며 타이머만 중지·비활성화하며 진행 중인 백업은 끝까지 실행합니다. 다시 등록하면 예약을 재개합니다. 미실행 기간의 보충 백업이 즉시 실행될 수 있습니다.
 - 예약 확인: `systemctl --user list-timers --all seulseul-db-backup.timer`
 - 결과·오류 확인: `journalctl --user -u seulseul-db-backup.service -n 100 --no-pager`
 - 실패 시 로그에 기록하며 별도 알림·자동 재시도는 없습니다. 다음 예약에 다시 시도합니다. 기존 백업 자동 삭제·외부 업로드도 하지 않으므로 디스크 용량을 확인하고 외부 보관은 별도로 설정하세요.
-- 예약 백업의 호스트 실행은 30분으로 제한하고 종료 대기는 30초입니다. 설정 변경 후 `./backup_run.sh`를 다시 실행해야 적용됩니다. 호스트의 Docker 명령 종료가 컨테이너 내부 `pg_dump` 종료까지 보장하지는 않으며 강제 종료 시 불완전한 파일이 남을 수 있습니다. 시간 초과 로그가 있으면 컨테이너 작업·파일을 점검하고 성공한 백업으로 사용하지 마세요. 수동 `./backup.sh`에는 이 systemd 제한이 적용되지 않습니다.
-- 관리 파일은 `~/.config/systemd/user/seulseul-db-backup.service`와 `.timer`입니다(`XDG_CONFIG_HOME` 설정 시 해당 경로). 저장소를 옮겼다면 새 위치에서 다시 등록하세요. 스크립트가 만든 파일만 갱신하며 같은 이름의 수동 작성 파일은 덮어쓰지 않습니다.
+- 예약 백업의 호스트 실행은 30분으로 제한하고 종료 대기는 30초입니다. 설정 변경 후 `./admin.sh backup schedule`을 다시 실행해야 적용됩니다. 호스트의 Docker 명령 종료가 컨테이너 내부 `pg_dump` 종료까지 보장하지는 않으며 강제 종료 시 불완전한 파일이 남을 수 있습니다. 시간 초과 로그가 있으면 컨테이너 작업·파일을 점검하고 성공한 백업으로 사용하지 마세요. 수동 `./admin.sh backup`에는 이 systemd 제한이 적용되지 않습니다.
+- 관리 파일은 `~/.config/systemd/user/seulseul-db-backup.service`와 `.timer`입니다(`XDG_CONFIG_HOME` 설정 시 해당 경로). 서비스는 인자 없이 `scripts/backup.sh`를 실행합니다. **이전 `backup_run.sh`로 등록한 예약은 옮겨진 루트 `backup.sh`를 가리키므로, 코드를 받은 뒤 `./admin.sh backup schedule`을 한 번 다시 실행해야 합니다.** 재등록 전까지는 운영 명령을 실행할 때마다 경고가 나옵니다. 저장소를 옮겼다면 새 위치에서 다시 등록하세요. 스크립트가 만든 파일만 갱신하며 같은 이름의 수동 작성 파일은 덮어쓰지 않습니다.
 
-서버에서 PostgreSQL이 실행 중일 때 `./backup.sh`를 실행합니다. 봇을 끄거나 마이그레이션을 실행하지 않으며, DB 컨테이너와 같은 버전의 `pg_dump --format=custom`을 사용합니다. 기본 위치는 저장소 상위의 `backups`로, `~/app`에서는 `~/backups/seulseul-UTC시각-고유문자열/database.dump`에 저장됩니다. 출력된 경로를 확인하세요.
+서버에서 PostgreSQL이 실행 중일 때 `./admin.sh backup`(관리 콘솔 메뉴 7)을 실행합니다. 봇을 끄거나 마이그레이션을 실행하지 않으며, DB 컨테이너와 같은 버전의 `pg_dump --format=custom`을 사용합니다. 기본 위치는 저장소 상위의 `backups`로, `~/app`에서는 `~/backups/seulseul-UTC시각-고유문자열/database.dump`에 저장됩니다. 출력된 경로를 확인하세요.
 
 - 디렉터리는 700, 파일은 600 권한입니다. 비밀번호를 명령 인자에 넣거나 `.env`를 셸로 실행하지 않습니다.
 - `pg_dump` 성공·빈 파일 여부 확인 후 `pg_restore --file=/dev/null`로 SQL을 실행하지 않고 전체 아카이브를 해독합니다. 성공한 경우에만 `.partial`을 제거하고 `database.dump`와 `SHA256SUMS`를 남깁니다. 이것은 **실제 복구 시험을 대신하지 않습니다**.
 - 실패 시 이번 실행에서 만든 불완전한 파일만 정리하고 비정상 종료합니다. 기존 백업 자동 삭제·보존기간 정리·DB 볼륨 삭제는 하지 않습니다.
 - 단일 DB의 스키마·데이터·권한 정보를 백업합니다. PostgreSQL 클러스터 역할·비밀번호·서버 설정·Slack/AI 토큰은 포함하지 않으므로 별도 안전한 보관이 필요합니다. 역할이 없는 격리 DB에 복구할 때는 `pg_restore --no-owner --no-acl` 사용 여부를 검토하세요.
 - 덤프에는 학생 개인정보와 공지 내용이 포함될 수 있습니다. Git·채팅에 올리지 말고 서버 밖의 접근 제한된 저장소에도 별도 복사하세요. 주기 실행은 위 타이머로 등록하며 보존 기간 정리·외부 저장소 업로드는 아직 자동화하지 않았습니다.
-- 마이그레이션 전에는 `./backup.sh`가 성공한 것을 확인하고 `./run.sh`를 실행합니다. `run.sh`가 백업을 자동 실행하는 것은 아닙니다.
+- 마이그레이션 전에는 `./admin.sh backup`이 성공한 것을 확인하고 `./run.sh`를 실행합니다. `run.sh`가 백업을 자동 실행하는 것은 아닙니다. 관리 콘솔의 재배포(메뉴 9)는 시작 전에 백업할지 묻습니다.
 
 - 최초 준비: `./run.sh setup` → `nano .env` → `./view.sh config` → `./run.sh` → `./view.sh logs --follow`.
 - 코드 업데이트: 커밋·푸시된 코드를 서버에서 `git pull --ff-only origin main`으로 받은 뒤 `./run.sh` 실행. 자동 pull은 하지 않습니다. 운영 데이터가 있으면 먼저 백업하세요.
@@ -233,16 +240,16 @@ ngrok 터널은 `restart: unless-stopped`로 장애 시 자동 재시작됩니�
 
 이번 버전 이전 실패 행은 자동 오류 분류가 없으므로 소급 예약하지 않습니다. 예약이 없는 실패 행은 CLI로 재처리할 수 있고, 수동 재처리의 AI 분석이 다시 일시 장애로 실패하면 새 자동 재처리 예산을 시작합니다. 수동 permalink 조회 단계에서 실패하면 기존 횟수·예약·실패 기록을 유지합니다. 같은 원본 이벤트는 중복 처리를 생략하지만 같은 링크라도 새 메시지로 재게시하면 D-027에 따라 새 원본으로 분석합니다. `list`에 다음 예약과 횟수를 표시합니다. 예약 표시 시각은 저장된 시간대 기준입니다.
 
-운영 Docker 환경에서는 프로젝트 루트의 `./retry.sh`로 실패 공지를 조회·재처리할 수 있습니다. 인자 없이 실행하면 목록만 조회하며, `retry`를 명시해야 AI를 호출합니다. 이 스크립트는 두 번째 봇을 시작하지 않고 일회성 운영 컨테이너에서 CLI를 실행합니다.
+운영 Docker 환경에서는 관리 콘솔 메뉴 1(번호를 골라 AI 재분석)·메뉴 3(미적용 원본) 또는 `./admin.sh retry`로 실패 공지를 조회·재처리할 수 있습니다. 인자 없이 실행하면 목록만 조회하며, 번호를 지정해야 AI를 호출합니다. 두 번째 봇을 시작하지 않고 일회성 운영 컨테이너에서 CLI를 실행합니다.
 
 ```bash
-./retry.sh list --limit 100
-./retry.sh retry --index 1 --limit 100
-./retry.sh pending --limit 100
-./retry.sh retry --workspace-id '<워크스페이스 ID>' --url '<제출 링크>' --channel-id '<채널 ID>' --message-ts '<메시지 ts>'
+./admin.sh retry
+./admin.sh retry 1
+./admin.sh retry pending
+./admin.sh retry retry --workspace-id '<워크스페이스 ID>' --url '<제출 링크>' --channel-id '<채널 ID>' --message-ts '<메시지 ts>'
 ```
 
-`list` 또는 `dashboard`의 번호를 `retry --index`에 그대로 넣습니다. `retry.sh`는 AI를 다시 호출하며, AI 결과를 직접 입력하려면 `./notice.sh`의 수동 수정 흐름을 사용합니다.
+목록이나 대시보드의 번호를 그대로 넣습니다. 두 화면 모두 최근 100건을 같은 순서로 조회하므로 번호가 같습니다. 재처리는 AI를 다시 호출하며, AI 결과를 직접 입력하려면 메뉴 2 또는 `./admin.sh notice`의 수동 수정 흐름을 사용합니다.
 
 직접 Docker Compose 명령을 사용해야 한다면 다음과 같이 실행합니다.
 
@@ -280,12 +287,12 @@ docker compose -f compose.prod.yaml exec -T bot python -m seulseul.notices.retry
 
 ## 가입 학생에게 운영 안내 DM 보내기
 
-운영 서버의 저장소 폴더에서 `./announce.sh`를 실행합니다. 새 코드를 반영한 뒤
+운영 서버의 저장소 폴더에서 관리 콘솔 메뉴 6 또는 `./admin.sh announce`를 실행합니다. 새 코드를 반영한 뒤
 `docker compose -f compose.prod.yaml build bot`으로 도구가 들어 있는 이미지를 먼저 빌드하세요.
 실행 중인 PostgreSQL과 Slack API 연결이 필요하며 봇 프로세스가 중지되어 있어도 발송할 수 있습니다.
 
 ```bash
-./announce.sh
+./admin.sh announce
 ```
 
 1. 점검·복구 등의 안내문을 여러 줄로 입력합니다(최대 3,000자).
@@ -307,18 +314,19 @@ Slack 전송 제한이 발생하면 남은 발송을 중단합니다.
 
 ## 운영자 수동 공지 처리
 
-봇을 초대할 수 없는 `4기_교육생_전체공지` 채널의 공지나 자동 분석 실패 공지는 운영자 도구로 처리합니다. 새 `./notice.sh`는 원문 permalink와 본문을 대화형으로 받고, 기존 `manual add|edit|delete` CLI도 원문 파일을 직접 전달하는 방식으로 유지합니다. 모든 경로가 기존 공지 서비스·중복 판정·학생별 DM 갱신을 재사용하며 학생이 Slack에서 실행하는 명령은 추가하지 않습니다.
+봇을 초대할 수 없는 채널(예: `4기_교육생_전체공지`)의 공지나 자동 분석 실패 공지는 운영자 도구로 처리합니다. **원문 채널이 공지 채널 설정에 없어도 등록할 수 있습니다**(D-042). 관리 콘솔 메뉴 2(`./admin.sh notice`)는 원문 permalink와 본문을 대화형으로 받고, 기존 `manual add|edit|delete` CLI도 원문 파일을 직접 전달하는 방식으로 유지합니다. 모든 경로가 기존 공지 서비스·중복 판정·학생별 DM 갱신을 재사용하며 학생이 Slack에서 실행하는 명령은 추가하지 않습니다.
 
 ### 공지를 간편하게 등록·수정·삭제하기
 
 운영 서버의 저장소 폴더에서 실행합니다. 새 코드를 서버에 반영한 뒤 최초 한 번은 `./run.sh`로 봇 이미지를 갱신해야 새 입력 도우미를 사용할 수 있습니다.
 
 ```bash
-./notice.sh
+./admin.sh notice
 ```
 
 1. `등록`, `수정`, `삭제` 중 작업을 선택합니다.
-2. 등록은 Slack 원문 permalink와 원문을 붙여 넣고, AI 분석 또는 링크별 수동 제목·요약·마감일을 선택합니다. 원문 입력은 줄 하나에 `.done`을 입력해 끝냅니다.
+2. 등록은 Slack 원문 permalink와 원문을 붙여 넣고, AI 분석 또는 링크별 수동 제목·요약·마감일을 선택합니다. 원문 입력은 줄 하나에 `.done`을 입력해 끝냅니다. 워크스페이스는 봇 토큰 기준으로 자동 확인하므로 입력하지 않습니다(확인하지 못할 때만 묻습니다).
+   - 원문 채널이 설정에 없으면(봇이 없는 채널) 설정된 공지 채널을 `1) 광주 전체 · C…`, `2) 2반 · C…`처럼 보여 주고 **학생 배정 기준 채널**을 번호로 고르게 합니다. 고른 채널의 대상 학생에게 보이고, 원문 링크는 실제 메시지 링크 그대로 저장됩니다. 원문 채널이 설정에 있으면 묻지 않습니다.
 3. 수정은 설정된 채널의 공지를 번호로 선택하고 바꿀 값만 입력합니다. **Enter는 기존 값 유지**, `q`·입력 중 `Ctrl+C`는 취소입니다. 같은 원문에 링크가 여러 개면 목록에 제출 링크가 함께 표시되고 선택한 링크의 분석값만 수정합니다.
 4. 삭제는 공지 원문을 선택해 확인합니다. Slack 원문 하나를 삭제하는 의미이므로 그 원문 안의 링크가 여러 개면 모두 삭제 상태가 됩니다.
 5. 등록·수정·삭제 모두 마지막 `y` 확인 후 저장합니다. 확인에서 Enter를 누르면 취소합니다.
@@ -326,19 +334,25 @@ Slack 전송 제한이 발생하면 남은 발송을 중단합니다.
 워크스페이스 ID·원문·제출 링크는 DB에서 읽으므로 별도 텍스트 파일이나 긴 명령어가 필요 없습니다. 원문 링크 조회에 실패해 DB에 링크가 없는 경우에만 Slack 원문 링크를 묻습니다. 시간대 없는 마감일은 한국 시간이며, 날짜가 바뀌면 마감 근거의 기본값도 새 날짜로 제시합니다.
 
 - AI를 호출하지 않고 기존 수동 수정 서비스로 저장합니다. 원문 본문·제출 링크와 완료 기록은 보존하며 Slack 원문 메시지 자체는 편집하지 않습니다. 실행 중인 운영 봇이 기존 DM을 갱신합니다.
-- 기본 최근 20건, 최대 100건입니다. `./notice.sh --limit 100`으로 더 보거나 `./notice.sh --workspace-id T...`로 워크스페이스를 좁힐 수 있습니다. 100건보다 오래된 공지는 아래 기존 `manual add/edit/delete` 명령을 사용합니다.
+- 기본 최근 20건, 최대 100건입니다. `./admin.sh notice --limit 100`으로 더 보거나 `./admin.sh notice --workspace-id T...`로 워크스페이스를 좁힐 수 있습니다. 100건보다 오래된 공지는 아래 기존 `manual add/edit/delete` 명령을 사용합니다.
 - 같은 Slack 원문에 링크가 여러 개면 체크리스트 제목에 `[1/2]`, `[2/2]`처럼 순번을 붙이고 `forms.gle/…`, `docs.google.com/document/…` 같은 짧은 링크 식별자를 함께 보여 줍니다. 분석 결과 제목이 같아도 제출 대상을 구분할 수 있습니다.
 - 저장 직전 원본 잠금 아래 선택 당시 기록을 비교합니다. 입력 중 변경·삭제·재처리가 있거나 원본이 처리 중/미적용이면 저장하지 않습니다. 오래된 데이터에 원본 상태 기록이 없을 때도 중단하며 기존 CLI로 상태를 확인해야 합니다.
 - 공지 내용을 임시 파일·설정 파일에 저장하거나 셸 명령으로 실행하지 않습니다. `.env`를 출력하거나 shell source하지 않으며 Rootless Docker 운영 경계를 재사용합니다.
 - 이 스크립트는 일회성 CLI 컨테이너만 실행합니다. DB·봇을 시작/중지하거나 두 번째 Slack Socket Mode 봇을 띄우지 않습니다.
-- 기존 `./notice_edit.sh`는 수정만 필요한 호환용 단축 명령으로 유지합니다.
+- 실패하면 `작업`·`단계`·`원인`과 해결 방법을 보여 줍니다(원인의 URL·토큰은 가리고, DB 오류는 종류만 표시). 처리 결과·실패 원인은 서버의 `~/logs/manual-notice.log`(권한 600, 저장소 밖)에 남고 `./view.sh logs manual`로 봅니다. 원본 기록은 `--raw`, 실시간은 `--follow`입니다.
+- 수정만 하던 `./notice_edit.sh`는 같은 수정 화면이라 제거했습니다. `./admin.sh notice`에서 `2`를 선택하세요.
 
 ### 기존 명령으로 등록·수정·삭제하기
 
 ```bash
 python -m seulseul.notices.manual add \
-  --workspace-id '<워크스페이스 ID>' \
   --source-url 'https://workspace.slack.com/archives/C.../p...' \
+  --text-file notice.txt
+
+# 봇이 없거나 설정에 없는 채널의 원문: 학생 배정 기준 채널을 지정합니다(수정·삭제도 같은 값).
+python -m seulseul.notices.manual add \
+  --source-url 'https://workspace.slack.com/archives/C0NOBOT.../p...' \
+  --target-channel-id '<설정된 공지 채널 ID>' \
   --text-file notice.txt
 
 python -m seulseul.notices.manual edit \
@@ -360,7 +374,7 @@ python -m seulseul.notices.manual delete \
   --source-url 'https://workspace.slack.com/archives/C.../p...'
 ```
 
-`--text-file -`를 사용하면 원문을 표준 입력으로 받을 수 있습니다. 수동 마감일에 시간대가 없으면 `Asia/Seoul`로 해석합니다. 제목·요약·마감일을 모두 입력하면 AI를 호출하지 않으며, 기존 체크리스트 완료 상태는 유지됩니다.
+`--workspace-id`는 생략하면 봇 토큰 기준으로 자동 확인하며, 실패하면 직접 지정하라고 안내합니다. `--target-channel-id`는 원문 채널이 설정에 없을 때만 쓰고 설정된 공지 채널이어야 합니다. 실패 시 `✖ 수동 공지 <작업> 실패: <원인>`을 출력하고 로그를 남깁니다. `--text-file -`를 사용하면 원문을 표준 입력으로 받을 수 있습니다. 수동 마감일에 시간대가 없으면 `Asia/Seoul`로 해석합니다. 제목·요약·마감일을 모두 입력하면 AI를 호출하지 않으며, 기존 체크리스트 완료 상태는 유지됩니다.
 
 운영 Docker에서는 원문을 표준 입력으로 전달해 일회성 컨테이너로 실행할 수 있습니다.
 

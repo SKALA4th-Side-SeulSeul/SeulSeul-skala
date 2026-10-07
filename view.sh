@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
+# 운영 상태·대시보드·로그·DB 조회. 서비스를 시작·중지하거나 데이터를 바꾸지 않는다.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/operations.sh"
 
 usage() {
-    cat <<'USAGE'
-사용법: ./view.sh [status|dashboard [--watch]|logs [서비스] [옵션]|db|schema|config|--help]
-  status(기본): 컨테이너 상태 / dashboard: 공지 처리 현황·수동 조치 목록
-  dashboard 옵션: --watch(-w) 5초마다 갱신
-  logs: 최근 로그 조회
-  서비스: bot(기본), oauth, ngrok, postgres, all
-  logs 옵션: --follow(-f) 실시간 추적, --tail N 최근 N줄, --raw 원본 출력
-  db: 읽기 전용 psql 접속 (종료: \q) / schema: 테이블 목록
-  config: 값 출력 없이 Compose 설정 검증
-  기본 logs는 최근 로그만 출력하고 종료합니다. 실시간 로그는 --follow를 붙이세요.
-  로그 공유 전 토큰·개인정보를 가리세요. Ctrl+C는 로그 보기만 종료합니다.
-USAGE
+    ui_banner '슬슬 모니터링' '사용법 · 무엇이든 조회만 하고 서비스는 바꾸지 않습니다'
+    ui_section '상태와 공지 처리 현황'
+    ui_usage_row './view.sh' '서비스가 켜져 있는지 확인'
+    ui_usage_row './view.sh dashboard' '공지 처리 현황과 조치가 필요한 공지'
+    ui_usage_row './view.sh dashboard --watch' '대시보드를 5초마다 새로고침 (종료 Ctrl+C)'
+    ui_section '로그'
+    ui_usage_row './view.sh logs' '봇 최근 로그 100줄을 읽기 쉽게 보기'
+    ui_usage_row './view.sh logs bot --follow' '최근 로그 후 실시간으로 계속 보기'
+    ui_usage_row './view.sh logs bot --tail 300' '더 오래된 로그까지 보기'
+    ui_usage_row './view.sh logs all --follow' '봇·OAuth·ngrok·DB 로그 함께 보기'
+    ui_usage_row './view.sh logs bot --raw' '가공하지 않은 원본 로그 (진단용)'
+    ui_usage_row './view.sh logs manual' '수동 공지 등록·수정·삭제의 성공·실패 기록'
+    ui_info '서비스 이름: bot(기본), oauth, ngrok, postgres, all, manual'
+    ui_section 'DB와 설정'
+    ui_usage_row './view.sh db' '읽기 전용 psql 접속 (종료: \q)'
+    ui_usage_row './view.sh schema' 'DB 테이블 목록'
+    ui_usage_row './view.sh config' '설정값을 출력하지 않고 Compose 설정 검증'
+    ui_footer '로그를 공유하기 전에 토큰·개인정보를 가리세요.' '공지·백업 관리는 ./admin.sh'
 }
 
 fail_usage() {
-    usage
+    usage >&2
     exit 2
 }
 
@@ -36,7 +43,8 @@ case "$operation" in
         exit 0
         ;;
     status|db|schema|config)
-        [[ $# -eq 1 ]] || fail_usage
+        # 인자 없는 ./view.sh는 status와 같다.
+        [[ $# -le 1 ]] || fail_usage
         ;;
     dashboard)
         shift
@@ -58,7 +66,7 @@ case "$operation" in
         service_set=false
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                bot|oauth|ngrok|postgres|all)
+                bot|oauth|ngrok|postgres|all|manual)
                     [[ "$service_set" == false ]] || fail_usage
                     log_service="$1"
                     service_set=true
@@ -107,6 +115,10 @@ format_logs() {
     local -a services=("$service")
     local -a log_args=(logs --no-color --tail "$tail")
 
+    if [[ "$service" == manual ]]; then
+        show_manual_logs "$tail" "$follow" "$raw"
+        return
+    fi
     if [[ "$service" == all ]]; then
         services=(bot oauth ngrok postgres)
     fi
@@ -115,24 +127,62 @@ format_logs() {
         mode+=' + 실시간 추적'
     fi
 
-    printf 'SeulSeul 운영 로그 · 대상: %s · %s\n' "$service" "$mode"
+    ui_banner '슬슬 운영 로그' "대상 ${service} · ${mode}"
     if [[ "$raw" == true ]]; then
-        echo '표시 형식: Docker 원본 로그 (--raw)'
+        ui_info '표시 형식: Docker 원본 로그 (--raw). 식별자·개인정보가 포함될 수 있습니다.'
+        if [[ "$follow" == true ]]; then
+            ui_hint '종료: Ctrl+C (서비스는 중지하지 않음)'
+        fi
+        echo
         compose "${log_args[@]}" "${services[@]}"
         return
     fi
 
-    echo '표시 형식: 시각 | 상태 | 주체 | 작업 결과'
+    ui_info '표시 형식: 시각 | 상태 | 주체 | 작업 결과'
+    ui_info "상태: 정상 · 주의 · 오류 · 무시 (최근 ${tail}줄)"
     if [[ "$follow" == true ]]; then
-        echo '종료: Ctrl+C (서비스는 중지하지 않음)'
+        ui_hint '종료: Ctrl+C (서비스는 중지하지 않음)'
+    else
+        ui_hint '계속 지켜보려면 --follow, 더 오래된 기록은 --tail 300'
     fi
+    echo
 
+    compose "${log_args[@]}" "${services[@]}" | humanize_logs
+}
+
+# 수동 공지 처리 기록(scripts/notice.sh가 남긴 파일)을 같은 형식으로 보여 준다.
+show_manual_logs() {
+    local tail="$1" follow="$2" raw="$3" mode='최근 기록'
+    local -a tail_args=(-n "$tail")
+    if [[ "$follow" == true ]]; then
+        tail_args+=(-f)
+        mode+=' + 실시간 추적'
+    fi
+    ui_banner '슬슬 수동 공지 기록' "$mode"
+    ui_info "기록 위치: $manual_log_file"
+    if [[ ! -f "$manual_log_file" ]]; then
+        echo
+        ui_info '아직 수동 공지 기록이 없습니다. ./admin.sh notice 로 처리하면 남습니다.'
+        return
+    fi
+    if [[ "$raw" == true ]]; then
+        ui_info '표시 형식: 원본 기록 (--raw)'
+        echo
+        tail "${tail_args[@]}" "$manual_log_file"
+        return
+    fi
+    ui_info '표시 형식: 시각 | 상태 | 주체 | 작업 결과 · 원본은 --raw'
+    echo
+    tail "${tail_args[@]}" "$manual_log_file" | humanize_logs
+}
+
+# Docker 로그와 수동 공지 기록을 "시각 | 상태 | 주체 | 작업 결과"로 바꾼다. 표준 입력을 읽는다.
+humanize_logs() {
     local use_color=0
     if [[ -t 1 ]]; then
         use_color=1
     fi
-    compose "${log_args[@]}" "${services[@]}" |
-        awk -v use_color="$use_color" '
+    awk -v use_color="$use_color" '
         function trim(value) {
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
             return value
@@ -339,6 +389,29 @@ format_logs() {
                 next
             }
 
+            if (line ~ /수동 공지 처리 실패:/) {
+                print_row(time, "오류", "운영자", "수동 공지 " plain_value(line, "action") " 실패 · " plain_value(line, "stage") " · " plain_value(line, "reason"))
+                next
+            }
+            if (line ~ /수동 공지 처리 중단:/) {
+                print_row(time, "주의", "운영자", "수동 공지 " plain_value(line, "action") " 중단 · " plain_value(line, "stage") " · " plain_value(line, "reason"))
+                next
+            }
+            if (line ~ /수동 공지 AI 분석 실패:/) {
+                print_row(time, "주의", "운영자", "수동 공지 AI 분석 실패 · 수동 입력으로 전환 · " plain_value(line, "reason"))
+                next
+            }
+            if (line ~ /수동 공지 처리 완료:/) {
+                summary = "수동 공지 " plain_value(line, "action") " 완료"
+                target = plain_value(line, "target")
+                if (target != "") summary = summary " · 배정 " target
+                print_row(time, "정상", "운영자", summary)
+                next
+            }
+            if (line ~ /워크스페이스 자동 확인 실패:/) {
+                print_row(time, "주의", "운영자", "워크스페이스 자동 확인 실패 · 직접 입력으로 전환")
+                next
+            }
             if (body ~ /메시지 이벤트 제외:/) {
                 print_row(time, "무시", "Slack", "수집 대상이 아닌 메시지를 무시했습니다")
                 next
@@ -428,36 +501,53 @@ format_logs() {
         '
 }
 
+show_dashboard() {
+    compose run --rm --no-deps -T bot python -m seulseul.notices.dashboard | ui_paint
+}
+
 case "$operation" in
     dashboard)
         if [[ "$dashboard_watch" == true ]]; then
-            trap 'printf "\n대시보드 새로고침을 종료합니다.\n"; exit 130' INT TERM
+            trap 'printf "\n"; ui_ok "대시보드 새로고침을 종료했습니다."; exit 130' INT TERM
             while true; do
-                if [[ -t 1 ]]; then
-                    printf '\033[2J\033[H'
-                fi
-                compose run --rm --no-deps -T bot python -m seulseul.notices.dashboard
-                printf '\n5초 후 새로고침 · 종료: Ctrl+C\n'
+                ui_clear
+                show_dashboard
+                printf '\n'
+                ui_hint '5초마다 새로고침합니다 · 종료: Ctrl+C'
                 sleep 5
             done
         fi
-        compose run --rm --no-deps -T bot python -m seulseul.notices.dashboard
+        show_dashboard
         ;;
     status)
-        compose ps -a
+        ui_banner '슬슬 서비스 상태' "$(TZ=Asia/Seoul date '+%m/%d %H:%M') 기준"
+        ui_section '서비스'
+        show_services
+        ui_footer '공지 처리 현황: ./view.sh dashboard' '봇 로그: ./view.sh logs bot' \
+            '시작·재배포: ./run.sh   중지: ./stop.sh'
         ;;
     logs)
         format_logs "$log_service" "$log_tail" "$log_follow" "$log_raw"
         ;;
     db)
+        ui_banner '슬슬 DB 조회' '읽기 전용 psql'
+        ui_info '읽기 전용 옵션으로 접속합니다. 쓰기 설정을 해제하지 마세요.'
+        ui_hint '테이블 목록: \dt   종료: \q'
+        echo
         compose exec -e PGOPTIONS='-c default_transaction_read_only=on' postgres \
             sh -c 'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
         ;;
     schema)
+        ui_banner '슬슬 DB 테이블 목록' '읽기 전용'
+        echo
         compose exec -T -e PGOPTIONS='-c default_transaction_read_only=on' postgres \
             sh -c 'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
         ;;
     config)
-        echo 'Compose 설정 검증 통과 (DB 연결·AI 키 유효성 검증은 아님).'
+        ui_banner '슬슬 설정 검증' '값은 출력하지 않습니다'
+        echo
+        ui_ok 'Compose 설정 형식이 올바릅니다.'
+        ui_info 'DB 연결과 Slack·AI 키가 실제로 유효한지는 검증하지 않습니다.'
+        ui_footer '적용하려면 ./run.sh 로 재생성하세요.'
         ;;
 esac

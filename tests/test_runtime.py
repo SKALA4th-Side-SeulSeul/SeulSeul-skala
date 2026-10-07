@@ -5,7 +5,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from seulseul.main import SEOUL_TIMEZONE, SeoulFormatter, configure_logging
+from seulseul.logging_setup import SEOUL_TIMEZONE, SeoulFormatter, configure_logging
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "run_bot.sh"

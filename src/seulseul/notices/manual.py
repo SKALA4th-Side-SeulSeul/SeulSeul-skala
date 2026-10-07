@@ -1,8 +1,14 @@
-"""운영자가 Slack 원문을 수동 등록·수정·삭제하는 CLI."""
+"""운영자가 Slack 원문을 수동 등록·수정·삭제하는 CLI.
+
+봇이 없거나 설정에 없는 채널의 원문은 --target-channel-id로 학생 배정 기준 채널(설정된
+공지 채널)을 지정한다. 수정·삭제도 등록 때와 같은 배정 기준 채널을 지정해야 같은 원본으로 찾는다.
+워크스페이스는 생략하면 봇 토큰 기준으로 자동 확인한다(D-042).
+"""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 import time
@@ -17,6 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from seulseul.ai.client import OpenAICompatibleChatClient
 from seulseul.ai.model import NoticeAnalysis
 from seulseul.ai.service import NoticeAnalyzer
+from seulseul.checklists.model import ChecklistDeliveryError
 from seulseul.config import (
     ConfigError,
     load_ai_settings,
@@ -24,9 +31,12 @@ from seulseul.config import (
     load_slack_settings,
 )
 from seulseul.database import create_database_engine, create_session_factory
+from seulseul.logging_setup import configure_logging
 from seulseul.notices.repository import SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeRetryError, NoticeService
+from seulseul.slack.client import SlackChecklistClient
 
+logger = logging.getLogger(__name__)
 SEOUL = ZoneInfo("Asia/Seoul")
 SLACK_MESSAGE_PATH = re.compile(r"^/archives/(?P<channel>[CG][A-Z0-9]+)/p(?P<stamp>[0-9]{16})$")
 MAX_MANUAL_TEXT_CHARS = 12_000
@@ -157,8 +167,7 @@ def _parser() -> argparse.ArgumentParser:
             action,
             help="새 공지 등록" if action == "add" else "기존 공지 수정",
         )
-        command.add_argument("--workspace-id", required=True)
-        command.add_argument("--source-url", required=True, help="Slack 원문 permalink")
+        _add_source_arguments(command)
         command.add_argument(
             "--text-file", required=True, help="공지 원문 파일 경로; -는 표준 입력"
         )
@@ -167,9 +176,47 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--deadline", help="AI 실패 시 사용할 마감일(서울 시간)")
         command.add_argument("--deadline-source-text", help="마감일 근거 원문")
     deleting = commands.add_parser("delete", help="공지 삭제 처리")
-    deleting.add_argument("--workspace-id", required=True)
-    deleting.add_argument("--source-url", required=True, help="Slack 원문 permalink")
+    _add_source_arguments(deleting)
     return parser
+
+
+def _add_source_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--workspace-id", help="생략하면 봇 토큰 기준으로 자동 확인")
+    command.add_argument("--source-url", required=True, help="Slack 원문 permalink")
+    command.add_argument(
+        "--target-channel-id",
+        help="봇이 없거나 설정에 없는 채널의 원문을 배정할 설정된 공지 채널 ID",
+    )
+
+
+def target_channel(source_channel: str, requested: str | None, allowed: tuple[str, ...]) -> str:
+    """원문 채널이 설정에 있으면 그대로, 없으면 지정한 배정 기준 채널을 쓴다."""
+    if source_channel in allowed:
+        if requested not in {None, source_channel}:
+            raise NoticeRetryError(
+                "원문 채널이 이미 공지 채널 설정에 있어 --target-channel-id를 쓰지 않습니다."
+            )
+        return source_channel
+    if requested is None:
+        raise NoticeRetryError(
+            "봇이 없거나 설정에 없는 채널의 원문입니다. --target-channel-id로 학생 배정 기준 "
+            f"채널을 지정하세요. 지정 가능: {', '.join(allowed) or '없음'}"
+        )
+    if requested not in allowed:
+        raise NoticeRetryError(
+            f"--target-channel-id는 설정된 공지 채널이어야 합니다. 지정 가능: {', '.join(allowed)}"
+        )
+    return requested
+
+
+def detect_workspace(bot_token: str) -> str:
+    try:
+        return SlackChecklistClient.from_token(bot_token).workspace_id()
+    except ChecklistDeliveryError as error:
+        raise NoticeRetryError(
+            f"워크스페이스를 자동으로 확인하지 못했습니다({error.code}). "
+            "--workspace-id를 지정하세요."
+        ) from error
 
 
 def _create_service(
@@ -201,14 +248,14 @@ def _create_service(
 
 
 def run_command(args: argparse.Namespace) -> int:
-    channel_id, message_ts = parse_slack_permalink(args.source_url)
+    source_channel, message_ts = parse_slack_permalink(args.source_url)
     manual_analysis = _manual_analysis_from_args(args) if args.action != "delete" else None
     text = _read_text(args.text_file) if args.action != "delete" else ""
     with ExitStack() as resources:
         settings = load_slack_settings()
         allowed_channels = (*settings.notice_channels, *settings.manual_notice_channels)
-        if channel_id not in allowed_channels:
-            raise NoticeRetryError("Slack 원문 채널이 자동·수동 공지 채널 설정에 없습니다.")
+        channel_id = target_channel(source_channel, args.target_channel_id, allowed_channels)
+        workspace_id = args.workspace_id or detect_workspace(settings.bot_token)
         engine = create_database_engine(load_database_settings())
         resources.callback(engine.dispose)
         repository = SqlAlchemyNoticeRepository(create_session_factory(engine))
@@ -221,7 +268,7 @@ def run_command(args: argparse.Namespace) -> int:
             event = build_manual_event(channel_id, message_ts, text, kind="changed")
         changed = service.record_channel_message(
             event,
-            workspace_id=args.workspace_id,
+            workspace_id=workspace_id,
             source_permalink=args.source_url,
             manual_analysis=manual_analysis,
         )
@@ -240,14 +287,30 @@ def run_command(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    configure_logging()
     try:
-        return run_command(args)
+        result = run_command(args)
     except (ConfigError, NoticeRetryError, ValueError, OSError) as error:
-        print(str(error))
+        print(f"✖ 수동 공지 {args.action} 실패: {error}")
+        logger.error(
+            "수동 공지 처리 실패: action=%s stage=CLI error=%s reason=%s",
+            args.action,
+            type(error).__name__,
+            error,
+        )
         return 1
-    except SQLAlchemyError:
+    except SQLAlchemyError as error:
+        # DB 오류 문자열에는 접속 정보가 섞일 수 있어 오류 종류만 남긴다.
         print("DB 작업에 실패했습니다. PostgreSQL 실행 상태와 DATABASE_URL을 확인해 주세요.")
+        logger.error(
+            "수동 공지 처리 실패: action=%s stage=DB error=%s reason=DB 작업 실패",
+            args.action,
+            type(error).__name__,
+        )
         return 1
+    if result == 0:
+        logger.info("수동 공지 처리 완료: action=%s", args.action)
+    return result
 
 
 if __name__ == "__main__":
