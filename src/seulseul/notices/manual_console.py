@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
+import select
+import sys
 from collections.abc import Callable, Collection, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
@@ -48,6 +51,66 @@ SECRET_PATTERN = re.compile(r"https?://\S+|(?:nvapi-|xox[baprs]-)[A-Za-z0-9_-]+"
 QUIET_LOGGERS = ("httpx", "httpcore", "openai", "urllib3")
 
 
+class LineReader:
+    """프롬프트를 출력하고 표준 입력에서 한 줄씩 읽는다.
+
+    파이썬 표준 입력 버퍼를 거치지 않고 한 바이트씩 읽어, 잘못된 답과 함께 붙여 넣어진
+    나머지 줄이 아직 읽히지 않은 채 남아 있는지 확인하고 버릴 수 있다. 운영 셸은
+    `docker compose run -T`로 실행해 표준 입력이 파이프이므로 터미널 기능에 기대지 않는다.
+    """
+
+    def __init__(self, fd: int | None = None, output=None) -> None:
+        self._fd = fd
+        self._output = output
+
+    def _descriptor(self) -> int | None:
+        # 표준 입력이 실제 파일이 아닌 환경(테스트 등)에서는 파일 번호가 없어 input()으로 대신한다.
+        if self._fd is None:
+            try:
+                self._fd = sys.stdin.fileno()
+            except (AttributeError, OSError, ValueError):
+                self._fd = -1
+        return self._fd if self._fd >= 0 else None
+
+    def __call__(self, prompt: str) -> str:
+        fd = self._descriptor()
+        if fd is None:
+            return input(prompt)
+        output = self._output or sys.stdout
+        output.write(prompt)
+        output.flush()
+        data = bytearray()
+        while True:
+            try:
+                chunk = os.read(fd, 1)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if not data:
+                    raise EOFError
+                break
+            if chunk == b"\n":
+                break
+            data += chunk
+        return data.decode("utf-8", "replace").rstrip("\r")
+
+    def discard_pending(self, wait_seconds: float = 0.2) -> int:
+        """이미 도착한 입력을 버리고 버린 줄 수를 돌려준다(붙여넣기 남은 줄 정리용)."""
+        fd = self._descriptor()
+        if fd is None:
+            return 0
+        lines = 0
+        while True:
+            try:
+                ready, _, _ = select.select([fd], [], [], wait_seconds)
+                chunk = os.read(fd, 65536) if ready else b""
+            except OSError:
+                return lines
+            if not chunk:
+                return lines
+            lines += chunk.count(b"\n")
+
+
 @dataclass
 class Progress:
     """실패 안내와 로그에 쓰는 현재 작업과 단계."""
@@ -67,6 +130,7 @@ def run_interactive(
     channel_targets: Mapping[str, int | None] | None = None,
     workspace_resolver: Callable[[], str] | None = None,
     progress: Progress | None = None,
+    discard_pending: Callable[[], int] = lambda: 0,
 ) -> int:
     """메뉴를 한 번 실행하고 저장 결과를 반환한다."""
     progress = progress or Progress()
@@ -84,6 +148,7 @@ def run_interactive(
                 channel_targets=channel_targets,
                 workspace_resolver=workspace_resolver,
                 progress=progress,
+                discard_pending=discard_pending,
             )
         elif action == "2":
             progress.action, progress.stage = "수정", "공지 선택·값 입력·저장"
@@ -185,13 +250,13 @@ def _add(
     channel_targets: Mapping[str, int | None] | None = None,
     workspace_resolver: Callable[[], str] | None = None,
     progress: Progress | None = None,
+    discard_pending: Callable[[], int] = lambda: 0,
 ) -> int:
     progress = progress or Progress(action="등록")
     progress.stage = "워크스페이스 확인"
     workspace_id = workspace_id or _resolve_workspace(read, workspace_resolver)
     progress.stage = "원문 링크 확인"
-    source_url = _required(read, "Slack 원문 메시지 링크")
-    source_channel, message_ts = parse_slack_permalink(source_url)
+    source_url, source_channel, message_ts = _source_link(read, discard_pending)
     progress.stage = "배정 채널 선택"
     channel_id = _choose_target_channel(read, source_channel, allowed_channels, channel_targets)
     target = _target_label(channel_id, channel_targets)
@@ -199,7 +264,9 @@ def _add(
     text = _multiline(read)
     links = extract_notice_urls(text)
     if not links:
-        raise ValueError("원문에 form 또는 docs 링크가 하나 이상 필요합니다.")
+        progress.stage = "제출 링크 입력"
+        text, links = _ask_missing_links(read, text)
+    _print_received(text, links)
 
     progress.stage = "AI 분석"
     use_ai = _read(read, "AI 분석을 시도할까요? [Y/n]: ").lower() not in {"n", "no"}
@@ -364,21 +431,92 @@ def _analysis_input(read: Callable[[str], str], link: str):
         return replace(analysis, deadline_source_text=source)
 
 
+def _source_link(
+    read: Callable[[str], str], discard_pending: Callable[[], int]
+) -> tuple[str, str, str]:
+    """Slack 메시지 링크를 받는다. 형식이 틀리면 등록을 끝내지 않고 이유를 알려 다시 묻는다."""
+    while True:
+        source_url = _required(read, "Slack 원문 메시지 링크")
+        try:
+            source_channel, message_ts = parse_slack_permalink(source_url)
+        except ValueError:
+            # 링크 자리에 원문을 붙여 넣은 경우 남은 줄이 다음 질문의 답으로 들어가지 않게 버린다.
+            dropped = discard_pending()
+            print(
+                "✖ Slack 메시지 링크가 아닙니다. 메시지 ⋮ 메뉴의 '링크 복사' 주소를 붙여 넣으세요."
+            )
+            print("  예: https://<워크스페이스>.slack.com/archives/C0123ABCD/p1789559318987269")
+            if dropped:
+                print(
+                    f"  함께 붙여 넣은 {dropped}줄은 무시했습니다. 원문은 다음 단계에서 넣습니다."
+                )
+            print("  취소하려면 q를 입력하세요.")
+            continue
+        return source_url, source_channel, message_ts
+
+
 def _multiline(read: Callable[[str], str]) -> str:
-    print("Slack 원문 내용을 붙여 넣으세요. 입력을 끝내려면 줄 하나에 .done을 입력하세요.")
+    """원문을 붙여 넣은 그대로 받는다.
+
+    줄마다 프롬프트를 띄우면 여러 줄을 붙여 넣을 때 화면에 프롬프트가 겹쳐 보이므로 띄우지 않는다.
+    원문 줄은 공백을 다듬거나 q를 취소로 보지 않고, 새 줄의 .done만 입력 끝으로 본다.
+    """
+    print("Slack 원문을 붙여 넣으세요.")
+    print("  다 붙여 넣었으면 새 줄에 .done 을 입력하고 Enter · 취소는 Ctrl+C")
     lines: list[str] = []
     while True:
-        line = _read(read, "원문> ")
-        if line == ".done":
-            text = "\n".join(lines).strip()
-            if not text:
-                raise ValueError("공지 원문이 비어 있습니다.")
-            if len(text) > MAX_MANUAL_TEXT_CHARS or "\x00" in text:
-                raise ValueError(
-                    f"공지 원문은 {MAX_MANUAL_TEXT_CHARS}자 이하이며 NUL 문자가 없어야 합니다."
-                )
-            return text
-        lines.append(line)
+        try:
+            line = read("")
+        except (EOFError, KeyboardInterrupt):
+            raise EditCancelled from None
+        if line.strip().lower() == ".done":
+            break
+        lines.append(line.rstrip("\r"))
+    text = "\n".join(lines).strip()
+    if not text:
+        raise ValueError("공지 원문이 비어 있습니다.")
+    _check_text_size(text)
+    return text
+
+
+def _check_text_size(text: str) -> None:
+    if len(text) > MAX_MANUAL_TEXT_CHARS or "\x00" in text:
+        raise ValueError(
+            f"공지 원문은 {MAX_MANUAL_TEXT_CHARS}자 이하이며 NUL 문자가 없어야 합니다."
+        )
+
+
+def _ask_missing_links(
+    read: Callable[[str], str], text: str
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """원문에 제출 링크가 없으면 등록을 끝내지 않고 링크만 따로 받아 원문 끝에 붙인다."""
+    print("⚠ 원문에서 form·docs 제출 링크를 찾지 못했습니다.")
+    print("  Slack에서 복사하면 글자에 걸린 링크 주소가 빠질 수 있습니다.")
+    print("  제출 링크 주소를 한 줄에 하나씩 붙여 넣고, 다 넣었으면 빈 줄에서 Enter (q 취소)")
+    added: list[str] = []
+    while True:
+        value = _read(read, "제출 링크> ")
+        if not value:
+            if added:
+                break
+            print("제출 링크가 하나 이상 필요합니다. 링크를 붙여 넣거나 q로 취소하세요.")
+            continue
+        if not extract_notice_urls(value):
+            print("form 또는 docs가 들어간 http(s) 링크가 아닙니다. 다시 붙여 넣으세요.")
+            continue
+        added.append(value)
+    text = f"{text}\n\n" + "\n".join(added)
+    _check_text_size(text)
+    return text, extract_notice_urls(text)
+
+
+def _print_received(text: str, links: tuple[tuple[str, str], ...]) -> None:
+    """붙여 넣은 원문이 제대로 들어갔는지 운영자가 확인할 수 있게 요약한다."""
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    print(f"✔ 원문 {len(text.splitlines())}줄 · {len(text)}자 · 제출 링크 {len(links)}개 받음")
+    print(f"  첫 줄: {_display(first_line[:60])}{'…' if len(first_line) > 60 else ''}")
+    for original_url, _ in links:
+        print(f"  링크: {_display(original_url)}")
 
 
 def _required(read: Callable[[str], str], label: str) -> str:
@@ -494,9 +632,12 @@ def main(argv: list[str] | None = None) -> int:
             repository = SqlAlchemyNoticeRepository(create_session_factory(engine))
             service = NoticeService(allowed_channels, repository=repository)
             ai_factory = _build_ai_factory(repository, resources, allowed_channels)
+            reader = LineReader()
             return run_interactive(
                 service,
                 allowed_channels=allowed_channels,
+                read=reader,
+                discard_pending=reader.discard_pending,
                 workspace_id=args.workspace_id,
                 ai_factory=ai_factory,
                 limit=args.limit,
