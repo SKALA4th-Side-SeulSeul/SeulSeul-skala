@@ -81,7 +81,7 @@ def _edit(service, limit, workspace_id, read) -> int:
         print(f"   제출 링크: {_display(notice.original_url)}")
         print(f"   {_display(notice.source_permalink) or '원문 링크 없음'}")
     if len(notices) == limit:
-        print("최근 조회 한도입니다. 더 보려면 ./notice_edit.sh --limit 100을 사용하세요.")
+        print("최근 조회 한도입니다. 더 보려면 ./admin.sh notice --limit 100을 사용하세요.")
     while True:
         selected = _read(read, "수정할 공지 번호: ")
         if selected.isascii() and selected.isdigit() and 1 <= int(selected) <= len(notices):
