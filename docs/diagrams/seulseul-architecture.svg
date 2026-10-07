@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="850" viewBox="0 0 1400 850" role="img" aria-labelledby="title desc">
+  <title id="title">SeulSeul architecture</title>
+  <desc id="desc">Slack, SeulSeul runtime, AI provider, PostgreSQL, and OAuth installation flow.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <style>
+      .title { font: 700 30px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .zone-title { font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #334155; }
+      .node-title { font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #0f172a; }
+      .node-text { font: 400 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .edge-label { font: 500 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #64748b; }
+      .legend { font: 400 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .edge { fill: none; stroke: #64748b; stroke-width: 2.2; marker-end: url(#arrow); }
+      .edge-accent { fill: none; stroke: #2563eb; stroke-width: 2.4; marker-end: url(#arrow-accent); }
+      .edge-dashed { fill: none; stroke: #94a3b8; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+      .zone { stroke-width: 1.5; }
+      .node { stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="850" fill="#f8fafc"/>
+  <text x="52" y="54" class="title">SeulSeul 시스템 구조</text>
+  <text x="52" y="82" class="subtitle">Slack 공지 수집 → AI 검증 → PostgreSQL 저장 → 학생별 동일 DM 갱신</text>
+
+  <!-- Zones -->
+  <rect x="38" y="118" width="302" height="378" rx="18" fill="#f5f3ff" stroke="#c4b5fd" class="zone"/>
+  <text x="62" y="151" class="zone-title">외부 서비스</text>
+
+  <rect x="378" y="118" width="684" height="550" rx="18" fill="#eff6ff" stroke="#93c5fd" class="zone"/>
+  <text x="404" y="151" class="zone-title">SeulSeul 런타임</text>
+
+  <rect x="1100" y="118" width="262" height="378" rx="18" fill="#f0fdf4" stroke="#86efac" class="zone"/>
+  <text x="1126" y="151" class="zone-title">영속 저장소</text>
+
+  <rect x="38" y="535" width="302" height="238" rx="18" fill="#fff7ed" stroke="#fdba74" class="zone"/>
+  <text x="62" y="568" class="zone-title">외부 워크스페이스 설치</text>
+
+  <!-- Connectors are intentionally drawn before nodes. -->
+  <path d="M 260 244 L 424 244" class="edge-accent"/>
+  <text x="296" y="231" class="edge-label">이벤트</text>
+
+  <path d="M 614 244 L 700 244" class="edge-accent"/>
+  <path d="M 820 278 L 820 318" class="edge-accent"/>
+  <text x="830" y="304" class="edge-label">서비스 호출</text>
+
+  <path d="M 590 365 L 700 365" class="edge"/>
+  <text x="610" y="351" class="edge-label">AI 분석</text>
+
+  <path d="M 700 395 C 560 470, 410 470, 284 380" class="edge"/>
+  <text x="430" y="475" class="edge-label">AI HTTP</text>
+
+  <path d="M 940 365 L 1128 365" class="edge"/>
+  <text x="1000" y="351" class="edge-label">저장·조회</text>
+
+  <path d="M 590 535 L 590 455" class="edge-accent"/>
+  <text x="602" y="510" class="edge-label">주기·변경 신호</text>
+
+  <path d="M 820 455 L 820 535" class="edge"/>
+  <path d="M 700 571 L 260 244" class="edge"/>
+  <text x="450" y="470" class="edge-label">DM·메시지 갱신</text>
+
+  <path d="M 220 662 L 424 662" class="edge"/>
+  <text x="270" y="650" class="edge-label">HTTPS</text>
+
+  <path d="M 604 662 L 700 662" class="edge"/>
+  <path d="M 940 662 L 1128 662" class="edge"/>
+  <text x="992" y="648" class="edge-label">설치 상태</text>
+
+  <path d="M 820 318 C 980 260, 1030 230, 1128 230" class="edge-dashed"/>
+  <text x="976" y="255" class="edge-label">DB 접근</text>
+
+  <path d="M 820 410 C 1020 455, 1060 430, 1128 430" class="edge-dashed"/>
+  <text x="975" y="446" class="edge-label">상태 기록</text>
+
+  <!-- Nodes -->
+  <rect x="76" y="188" width="184" height="78" rx="12" fill="#ede9fe" stroke="#8b5cf6" class="node"/>
+  <text x="168" y="218" text-anchor="middle" class="node-title">Slack 워크스페이스</text>
+  <text x="168" y="241" text-anchor="middle" class="node-text">공지·명령·버튼·DM</text>
+
+  <rect x="76" y="310" width="208" height="84" rx="12" fill="#ede9fe" stroke="#8b5cf6" class="node"/>
+  <text x="180" y="343" text-anchor="middle" class="node-title">Ollama / NVIDIA</text>
+  <text x="180" y="366" text-anchor="middle" class="node-text">요약·마감일 JSON</text>
+
+  <rect x="424" y="205" width="190" height="78" rx="12" fill="#dbeafe" stroke="#3b82f6" class="node"/>
+  <text x="519" y="235" text-anchor="middle" class="node-title">Socket Mode / Bolt</text>
+  <text x="519" y="258" text-anchor="middle" class="node-text">공개 URL 없이 이벤트 수신</text>
+
+  <rect x="700" y="205" width="240" height="78" rx="12" fill="#dbeafe" stroke="#3b82f6" class="node"/>
+  <text x="820" y="235" text-anchor="middle" class="node-title">slack/handlers.py</text>
+  <text x="820" y="258" text-anchor="middle" class="node-text">검증·ack()·서비스 호출</text>
+
+  <rect x="424" y="318" width="166" height="94" rx="12" fill="#dbeafe" stroke="#3b82f6" class="node"/>
+  <text x="507" y="350" text-anchor="middle" class="node-title">도메인 서비스</text>
+  <text x="507" y="374" text-anchor="middle" class="node-text">notices</text>
+  <text x="507" y="393" text-anchor="middle" class="node-text">checklists / users</text>
+
+  <rect x="700" y="318" width="240" height="94" rx="12" fill="#dbeafe" stroke="#3b82f6" class="node"/>
+  <text x="820" y="350" text-anchor="middle" class="node-title">ai/service.py</text>
+  <text x="820" y="374" text-anchor="middle" class="node-text">프롬프트·JSON·근거 검증</text>
+  <text x="820" y="393" text-anchor="middle" class="node-text">ai/client.py HTTP 경계</text>
+
+  <rect x="424" y="535" width="166" height="74" rx="12" fill="#dbeafe" stroke="#3b82f6" class="node"/>
+  <text x="507" y="565" text-anchor="middle" class="node-title">jobs/scheduler.py</text>
+  <text x="507" y="588" text-anchor="middle" class="node-text">30초·wakeup</text>
+
+  <rect x="700" y="535" width="240" height="74" rx="12" fill="#dbeafe" stroke="#3b82f6" class="node"/>
+  <text x="820" y="565" text-anchor="middle" class="node-title">slack/client.py</text>
+  <text x="820" y="588" text-anchor="middle" class="node-text">DM post/update·Slack API</text>
+
+  <rect x="1128" y="188" width="206" height="78" rx="12" fill="#dcfce7" stroke="#22c55e" class="node"/>
+  <text x="1231" y="218" text-anchor="middle" class="node-title">repository.py</text>
+  <text x="1231" y="241" text-anchor="middle" class="node-text">트랜잭션·잠금·lease</text>
+
+  <rect x="1128" y="310" width="206" height="78" rx="12" fill="#dcfce7" stroke="#22c55e" class="node"/>
+  <text x="1231" y="340" text-anchor="middle" class="node-title">PostgreSQL</text>
+  <text x="1231" y="363" text-anchor="middle" class="node-text">공지·학생·체크리스트</text>
+
+  <rect x="76" y="620" width="184" height="78" rx="12" fill="#ffedd5" stroke="#f97316" class="node"/>
+  <text x="168" y="650" text-anchor="middle" class="node-title">Slack 설치 흐름</text>
+  <text x="168" y="673" text-anchor="middle" class="node-text">Add to Slack / OAuth</text>
+
+  <rect x="424" y="620" width="180" height="78" rx="12" fill="#ffedd5" stroke="#f97316" class="node"/>
+  <text x="514" y="650" text-anchor="middle" class="node-title">ngrok</text>
+  <text x="514" y="673" text-anchor="middle" class="node-text">고정 HTTPS 터널</text>
+
+  <rect x="700" y="620" width="240" height="78" rx="12" fill="#ffedd5" stroke="#f97316" class="node"/>
+  <text x="820" y="650" text-anchor="middle" class="node-title">oauth_server.py</text>
+  <text x="820" y="673" text-anchor="middle" class="node-text">install·callback·healthz</text>
+
+  <rect x="1128" y="620" width="206" height="78" rx="12" fill="#ffedd5" stroke="#f97316" class="node"/>
+  <text x="1231" y="650" text-anchor="middle" class="node-title">OAuth 전용 볼륨</text>
+  <text x="1231" y="673" text-anchor="middle" class="node-text">설치·state 파일</text>
+
+  <!-- Legend -->
+  <rect x="378" y="735" width="984" height="70" rx="14" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="404" y="763" class="zone-title">읽는 법</text>
+  <line x1="500" y1="758" x2="555" y2="758" class="edge-accent"/>
+  <text x="568" y="763" class="legend">주요 요청·변경 흐름</text>
+  <line x1="720" y1="758" x2="775" y2="758" class="edge-dashed"/>
+  <text x="788" y="763" class="legend">간접 의존·저장 경계</text>
+  <rect x="930" y="746" width="16" height="16" rx="4" fill="#ede9fe" stroke="#8b5cf6"/>
+  <text x="956" y="759" class="legend">외부</text>
+  <rect x="1005" y="746" width="16" height="16" rx="4" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="1031" y="759" class="legend">런타임</text>
+  <rect x="1100" y="746" width="16" height="16" rx="4" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="1126" y="759" class="legend">DB</text>
+  <rect x="1170" y="746" width="16" height="16" rx="4" fill="#ffedd5" stroke="#f97316"/>
+  <text x="1196" y="759" class="legend">OAuth</text>
+  <text x="404" y="789" class="legend">일반 봇 이벤트는 Socket Mode, 외부 워크스페이스 설치 콜백만 ngrok HTTPS를 통과합니다.</text>
+</svg>
