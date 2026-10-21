@@ -41,7 +41,7 @@ def parse_notice_event(
     elif subtype == "message_deleted":
         kind = "deleted"
         message = event.get("previous_message", {})
-    elif subtype in (None, "bot_message"):
+    elif subtype in (None, "bot_message", "file_share"):
         kind = "created"
         message = event
     else:
@@ -62,7 +62,7 @@ def parse_notice_event(
         bot_id and message.get("bot_id") == bot_id
     ):
         return None
-    if kind != "deleted" and message.get("subtype") not in (None, "bot_message"):
+    if kind != "deleted" and message.get("subtype") not in (None, "bot_message", "file_share"):
         return None
     text = "" if kind == "deleted" else message.get("text")
     if not isinstance(text, str):

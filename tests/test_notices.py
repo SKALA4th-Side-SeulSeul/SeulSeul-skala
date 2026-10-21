@@ -639,6 +639,22 @@ def test_other_bot_message_is_allowed() -> None:
     assert parse_notice_event(event, {ALLOWED_CHANNEL}, "USEULSEUL").kind == "created"
 
 
+def test_file_share_message_with_form_link_is_collected() -> None:
+    url = "https://docs.google.com/forms/d/e/1FAIpQLExample/viewform"
+    event = channel_message(
+        subtype="file_share",
+        text=f"참여후기 제출 <{url}|구글폼>",
+        files=[{"id": "FEXAMPLE"}],
+    )
+    service = NoticeService({ALLOWED_CHANNEL})
+
+    notices = record(service, event)
+
+    assert len(notices) == 1
+    assert notices[0].original_url == url
+    assert notices[0].source_permalink == PERMALINK
+
+
 @pytest.mark.parametrize(
     "text",
     [
