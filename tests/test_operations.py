@@ -46,6 +46,7 @@ def operations(tmp_path, monkeypatch):
         "scripts/retry.sh",
         "scripts/announce.sh",
         "scripts/backup.sh",
+        "scripts/log_search.py",
         ".env.example",
     ):
         shutil.copyfile(ROOT / name, repo / name)
@@ -69,6 +70,12 @@ if [[ "$*" == *'exec pg_dump '* ]]; then
 fi
 if [[ "$*" == *'pg_restore --file=/dev/null'* ]]; then
     cat >/dev/null
+fi
+if [[ -f emit-ids && "$*" == *' ps -a -q bot' ]]; then
+    cat emit-ids
+fi
+if [[ -f emit-archive && "$*" == "logs --timestamps"* ]]; then
+    cat emit-archive
 fi
 if [[ -f emit-logs && "$*" == *' logs '* ]]; then
     cat emit-logs
@@ -135,6 +142,10 @@ def test_run_builds_stops_migrates_then_recreates_single_bot(operations):
     steps = calls()
     expected = [
         "config --quiet",
+        "ps -a -q bot",
+        "ps -a -q oauth",
+        "ps -a -q ngrok",
+        "ps -a -q postgres",
         "build bot migrate oauth",
         "stop bot oauth ngrok",
         "up -d --wait --wait-timeout 180 postgres",
@@ -1052,3 +1063,82 @@ def test_console_discards_input_left_after_action_and_still_waits(operations):
     terminal.send("q")
     assert terminal.finish() == 0
     assert sum("manual_console" in call for call in calls()) == 1
+
+
+def test_log_search_reads_current_archived_and_manual_records(operations):
+    repo, run, calls = operations
+    parent = repo.parent
+    (repo / "emit-logs").write_text(
+        "bot-1 | 2026-10-26T01:00:00Z 2026-10-26 10:00:00 INFO "
+        "명령어 처리: actor=김하늘 action=시작 result=완료\n"
+    )
+    archive = parent / "logs" / "archive" / "bot"
+    archive.mkdir(parents=True)
+    (archive / "abcdef123456.log").write_text(
+        "2026-10-25T01:00:00Z 2026-10-25 10:00:00 INFO "
+        "명령어 처리: actor=김하늘 action=완료 result=완료\n"
+    )
+    (parent / "logs" / "manual-notice.log").write_text(
+        "2026-10-24 10:00:00 INFO 수동 공지 처리 완료: action=등록 target=1\n"
+    )
+
+    result = run(
+        "view.sh",
+        "logs",
+        "search",
+        "--service",
+        "bot",
+        "--user",
+        "김하늘",
+        "--action",
+        "완료",
+        "--all",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "2026-10-26 10:00:00 | 정상 | bot" in result.stdout
+    assert "2026-10-25 10:00:00 | 정상 | bot" in result.stdout
+    assert "검색 결과 2건" in result.stdout
+    assert any("logs --no-color --timestamps --tail all bot" in call for call in calls())
+
+    result = run(
+        "view.sh",
+        "logs",
+        "search",
+        "--service",
+        "manual",
+        "--from",
+        "2026-10-24",
+        "--to",
+        "2026-10-24",
+        "--text",
+        "등록",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "검색 결과 1건" in result.stdout
+    assert "manual" in result.stdout
+
+
+def test_log_search_rejects_invalid_service_and_time(operations):
+    _, run, _ = operations
+    assert run("view.sh", "logs", "search", "--service", "unknown").returncode == 2
+    assert run("view.sh", "logs", "search", "--from", "today").returncode == 2
+
+
+def test_redeploy_archives_container_logs_before_recreation(operations):
+    repo, run, calls = operations
+    (repo / "emit-ids").write_text("abcdef123456\n")
+    (repo / "emit-archive").write_text("2026-10-26T01:00:00Z archived entry\n")
+
+    result = run("run.sh")
+
+    assert result.returncode == 0, result.stderr
+    archive = repo.parent / "logs" / "archive" / "bot" / "abcdef123456.log"
+    assert archive.read_text() == "2026-10-26T01:00:00Z archived entry\n"
+    assert archive.stat().st_mode & 0o777 == 0o600
+    steps = calls()
+    assert next(i for i, step in enumerate(steps) if "logs --timestamps" in step) < next(
+        i for i, step in enumerate(steps) if "--force-recreate" in step
+    )
+    result = run("run.sh")
+    assert result.returncode == 0, result.stderr
+    assert sum("logs --timestamps" in step for step in calls()) == 1

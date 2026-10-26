@@ -315,6 +315,8 @@ def render_dashboard(
         notice for notice in failed if notice.next_retry_at is not None and notice.retry_count < 3
     ]
     manual_count = len(failed) - len(scheduled)
+    if panel:
+        return _render_panel(failed, pending_sources, recent, now, width)
     table_limit = PANEL_RECENT_LIMIT if panel else TABLE_LIMIT
     table_recent = recent[:table_limit]
     lines: list[str] = []
@@ -405,6 +407,54 @@ def render_dashboard(
         lines.extend(
             footer(("원본: ./admin.sh retry pending", "상세: ./view.sh dashboard"), width=width)
         )
+    return "\n".join(_fit_line(line, width) for line in lines)
+
+
+def _render_panel(
+    failed: Sequence[Notice],
+    pending_sources: Sequence[tuple[str, str, str]],
+    recent: Sequence[Notice],
+    now: datetime,
+    width: int,
+) -> str:
+    """최소 터미널(80×24)의 공지 영역 10줄에 상태·조치·차트를 넣는다."""
+    scheduled = sum(
+        notice.next_retry_at is not None and notice.retry_count < 3 for notice in failed
+    )
+    manual = len(failed) - scheduled
+    lines = [
+        f"■ 공지 상태  ↻ 자동 {scheduled}건  ✖ 조치 {manual}건  ⚠ 미적용 {len(pending_sources)}건",
+        f"■ 필요한 조치 · {len(failed)}건  › 메뉴 1 재분석 · 메뉴 2 직접 수정",
+    ]
+    for index, notice in enumerate(failed[:2], 1):
+        symbol, state, _ = _failure_state(notice, now)
+        lines.append(
+            f"  {index}. {symbol} {state} · {_title(notice)} · 마감 {_format_deadline(notice)}"
+        )
+    if not failed:
+        lines.append("  ✔ 지금 처리할 공지가 없습니다.")
+    if len(failed) > 2:
+        lines.append(f"  … 외 {len(failed) - 2}건 · 전체 보기: 메뉴 5")
+    lines.append(f"■ 분석 현황 · 최근 {len(recent)}건")
+    counts = _status_counts(recent, now)
+    short_labels = ("정상", "자동", "조치", "기타")
+    lines.append(
+        "  "
+        + "  ".join(
+            f"{symbol}{short} {BAR_FILLED * min(5, round(count * 5 / max(1, len(recent))))}{count}"
+            for (symbol, _, count), short in zip(counts, short_labels, strict=True)
+        )
+    )
+    deadlines, total = _deadline_counts(recent, now)
+    lines.append(f"■ 마감 분포 · 7일 {total}건")
+    lines.append(
+        "  "
+        + "  ".join(
+            f"{label[3:5]}일{BAR_FILLED if count else BAR_EMPTY}{count}"
+            for _, label, count in deadlines
+        )
+    )
+    lines.append("  › 자세한 공지와 차트: 메뉴 5  ·  전체 로그 검색: 메뉴 4")
     return "\n".join(_fit_line(line, width) for line in lines)
 
 

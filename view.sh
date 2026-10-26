@@ -11,6 +11,9 @@ usage() {
     ui_usage_row './view.sh dashboard --watch' '대시보드를 5초마다 새로고침 (종료 Ctrl+C)'
     ui_section '로그'
     ui_usage_row './view.sh logs' '봇 최근 로그 100줄을 읽기 쉽게 보기'
+    ui_usage_row './view.sh logs search' '모든 서비스·보관 로그·수동 로그 검색'
+    ui_usage_row './view.sh logs search --from 2026-10-26 --user 홍길동' '한국 시각·사용자별 검색'
+    ui_usage_row './view.sh logs search --action 완료 --text 실패 --all' '행위·문구 검색, 전체 결과 보기'
     ui_usage_row './view.sh logs bot --follow' '최근 로그 후 실시간으로 계속 보기'
     ui_usage_row './view.sh logs bot --tail 300' '더 오래된 로그까지 보기'
     ui_usage_row './view.sh logs all --follow' '봇·OAuth·ngrok·DB 로그 함께 보기'
@@ -35,6 +38,8 @@ log_tail=100
 log_follow=false
 log_raw=false
 dashboard_watch=false
+log_search=false
+search_args=()
 
 case "$operation" in
     --help|-h)
@@ -63,8 +68,22 @@ case "$operation" in
         ;;
     logs)
         shift
+        if [[ "${1:-}" == search ]]; then
+            log_search=true
+            shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --service|--from|--to|--user|--action|--text|--limit)
+                        [[ $# -ge 2 ]] || fail_usage
+                        search_args+=("$1" "$2")
+                        shift 2 ;;
+                    --raw|--all) search_args+=("$1"); shift ;;
+                    *) fail_usage ;;
+                esac
+            done
+        fi
         service_set=false
-        while [[ $# -gt 0 ]]; do
+        while [[ $# -gt 0 && "$log_search" == false ]]; do
             case "$1" in
                 bot|oauth|ngrok|postgres|all|manual)
                     [[ "$service_set" == false ]] || fail_usage
@@ -105,6 +124,43 @@ case "$operation" in
 esac
 
 require_operations
+
+search_logs() (
+    local service file archive selected='all' index
+    local -a args=() services=(bot oauth ngrok postgres)
+    for ((index=0; index<${#search_args[@]}; index++)); do
+        if [[ "${search_args[index]}" == --service ]]; then
+            selected="${search_args[index+1]}"
+            unset 'search_args[index]' 'search_args[index+1]'
+            break
+        fi
+    done
+    case "$selected" in bot|oauth|ngrok|postgres|manual|all) ;; *) fail_usage ;; esac
+    local work
+    work="$(mktemp -d "${TMPDIR:-/tmp}/seulseul-logs-XXXXXX")"
+    trap 'rm -rf -- "$work"' EXIT
+    for service in "${services[@]}"; do
+        if [[ "$selected" != all && "$selected" != "$service" ]]; then continue; fi
+        file="$work/$service.log"
+        if ! compose logs --no-color --timestamps --tail all "$service" > "$file"; then
+            ui_warn "$service 현재 로그를 읽지 못했습니다. 보관 로그는 계속 검색합니다." >&2
+        fi
+        args+=(--source "$service" "$file")
+        archive="$manual_log_dir/archive/$service"
+        if [[ -d "$archive" && ! -L "$archive" ]]; then
+            for file in "$archive"/*.log; do
+                [[ -f "$file" && ! -L "$file" ]] && args+=(--source "$service" "$file")
+            done
+        fi
+    done
+    if [[ "$selected" == all || "$selected" == manual ]]; then
+        args+=(--source manual "$manual_log_file")
+    fi
+    ui_banner '슬슬 전체 로그 검색' '현재 컨테이너 + 재배포 전 보관 로그 + 수동 공지 기록'
+    ui_info '시각은 한국 시간 · 결과는 최신 순 · 사용자 기록이 없는 행은 사용자 검색에서 제외'
+    echo
+    python3 "$ops_root/scripts/log_search.py" "${args[@]}" "${search_args[@]}"
+)
 
 format_logs() {
     local service="$1"
@@ -527,7 +583,11 @@ case "$operation" in
             '시작·재배포: ./run.sh   중지: ./stop.sh'
         ;;
     logs)
-        format_logs "$log_service" "$log_tail" "$log_follow" "$log_raw"
+        if [[ "$log_search" == true ]]; then
+            search_logs
+        else
+            format_logs "$log_service" "$log_tail" "$log_follow" "$log_raw"
+        fi
         ;;
     db)
         ui_banner '슬슬 DB 조회' '읽기 전용 psql'

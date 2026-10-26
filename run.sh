@@ -77,11 +77,13 @@ if [[ "$operation" != postgres ]]; then
     echo
     ui_warn '같은 Slack 앱의 로컬 봇이 켜져 있다면 먼저 종료하세요.'
     ui_warn '운영 데이터가 있다면 먼저 백업하세요: ./admin.sh backup'
+    archive_container_logs
     next_step '이미지 빌드 (bot·migrate·oauth)'
     compose build bot migrate oauth
     next_step '기존 봇·OAuth·ngrok 중지'
     compose stop bot oauth ngrok
 fi
+if [[ "$operation" == postgres ]]; then archive_container_logs; fi
 next_step 'DB 준비 (정상 상태까지 최대 180초 대기)'
 compose up -d --wait --wait-timeout 180 postgres
 if [[ "$operation" != postgres ]]; then

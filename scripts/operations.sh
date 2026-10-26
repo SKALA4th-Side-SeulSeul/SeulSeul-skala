@@ -30,6 +30,33 @@ prepare_manual_log() {
     chmod 600 "$manual_log_file"
 }
 
+# 재생성 전 컨테이너별 전체 로그를 저장소 밖에 보관한다. 같은 ID는 다시 저장하지 않는다.
+archive_container_logs() {
+    local service id folder target stage
+    for service in bot oauth ngrok postgres; do
+        id="$(compose ps -a -q "$service")" || return
+        [[ -n "$id" ]] || continue
+        [[ "$id" =~ ^[a-fA-F0-9]{12,64}$ ]] || { ui_fail '컨테이너 ID 형식이 올바르지 않습니다.'; return 1; }
+        folder="$manual_log_dir/archive/$service"
+        if [[ -L "$manual_log_dir" || -L "$manual_log_dir/archive" || -L "$folder" ]]; then
+            ui_fail '로그 보관 폴더가 심볼릭 링크입니다.'
+            return 1
+        fi
+        (umask 077; mkdir -p "$folder") || return
+        chmod 700 "$manual_log_dir" "$manual_log_dir/archive" "$folder"
+        target="$folder/$id.log"
+        if [[ -e "$target" || -L "$target" ]]; then continue; fi
+        stage="$(mktemp "$folder/.capture-XXXXXX")" || return
+        if ! docker logs --timestamps "$id" > "$stage" 2>&1; then
+            ui_fail "$service 로그 보관 실패. 재배포를 중단합니다."
+            rm -f -- "$stage"
+            return 1
+        fi
+        chmod 600 "$stage"
+        mv -n -- "$stage" "$target" || return
+    done
+}
+
 # systemd 인용 규칙: 경로의 공백·따옴표·specifier 및 ExecStart 변수 확장 방어.
 unit_quote() {
     local value="$1"

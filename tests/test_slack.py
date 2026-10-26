@@ -23,6 +23,7 @@ from seulseul.checklists.model import (
     ChecklistItem,
     DailyChecklistBoard,
 )
+from seulseul.notices.model import Notice
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import (
     MessagePermalinkError,
@@ -35,6 +36,7 @@ from seulseul.slack.handlers import (
     SEULSEUL_COMMAND,
     create_checklist_action_handler,
     create_message_event_handler,
+    create_notice_result_close_handler,
     create_seulseul_command_handler,
     create_user_change_handler,
     register_checklist_handlers,
@@ -98,6 +100,135 @@ def test_reminder_normal_dm_right_close_and_safe_handler():
     handler(ack, respond, body, logging.getLogger(__name__))
     assert respond.call_args.kwargs["replace_original"] is False
     assert respond.call_args.kwargs["delete_original"] is False
+
+
+def test_notice_result_sends_only_to_two_admins_with_close_button():
+    from seulseul.ai.model import NoticeAnalysis
+
+    notice = Notice(
+        "TTEST",
+        "CNOTICE",
+        "100.1",
+        "raw",
+        "https://forms.example.test/task",
+        "https://forms.example.test/task",
+        "https://workspace.slack.com/archives/CNOTICE/p1001",
+        datetime(2026, 9, 20, tzinfo=timezone.utc),
+        "processed",
+        analysis=NoticeAnalysis(
+            "과제 제출",
+            "과제를 제출합니다.",
+            datetime(2026, 9, 21, tzinfo=timezone.utc),
+            "9월 21일까지",
+        ),
+    )
+    client = cleanup_client()
+    client.conversations_open.side_effect = [
+        {"channel": {"id": "DADMIN1"}},
+        {"channel": {"id": "DADMIN2"}},
+    ]
+    SlackChecklistClient(client).notify_notice_result(notice)
+    assert [call.kwargs["users"] for call in client.conversations_open.call_args_list] == [
+        "U0BHPU96LG0",
+        "U0BGTJD4HF0",
+    ]
+    assert [call.kwargs["channel"] for call in client.chat_postMessage.call_args_list] == [
+        "DADMIN1",
+        "DADMIN2",
+    ]
+    payload = client.chat_postMessage.call_args.kwargs
+    assert payload["blocks"][1]["accessory"]["action_id"] == "notice_result_close"
+    assert "과제 제출" in payload["text"]
+    assert "과제를 제출합니다." in str(payload["blocks"])
+    assert "https://forms.example.test/task" in str(payload["blocks"])
+
+
+def test_notice_result_close_only_deletes_admin_own_dm():
+    client = cleanup_client()
+    adapter = SlackChecklistClient(client)
+    handler = create_notice_result_close_handler(adapter)
+    ack, respond = Mock(), Mock()
+    body = {
+        "user": {"id": "U0BHPU96LG0"},
+        "container": {"channel_id": "DTEST", "message_ts": "100.1"},
+        "actions": [{"action_id": "notice_result_close"}],
+    }
+    handler(ack, respond, body, logging.getLogger(__name__))
+    ack.assert_called_once_with()
+    client.chat_delete.assert_called_once_with(channel="DTEST", ts="100.1")
+    client.chat_delete.reset_mock()
+    handler(ack, respond, {**body, "user": {"id": "USTUDENT"}}, logging.getLogger(__name__))
+    handler(
+        ack,
+        respond,
+        {**body, "container": {"channel_id": "DOTHER", "message_ts": "100.1"}},
+        logging.getLogger(__name__),
+    )
+    client.chat_delete.assert_not_called()
+    assert respond.call_args.kwargs["replace_original"] is False
+    assert respond.call_args.kwargs["delete_original"] is False
+
+
+def test_notice_result_close_unexpected_error_returns_temporary_notice():
+    adapter = Mock()
+    adapter.close_notice_result.side_effect = RuntimeError("unexpected")
+    handler = create_notice_result_close_handler(adapter)
+    respond = Mock()
+    body = {
+        "user": {"id": "U0BHPU96LG0"},
+        "container": {"channel_id": "DTEST", "message_ts": "100.1"},
+    }
+    handler(Mock(), respond, body, logging.getLogger(__name__))
+    assert respond.call_args.kwargs["replace_original"] is False
+    assert respond.call_args.kwargs["delete_original"] is False
+
+
+def test_notice_result_failure_does_not_block_other_admin():
+    from seulseul.checklists.model import ChecklistDeliveryError
+
+    notice = Notice(
+        "TTEST",
+        "CNOTICE",
+        "100.1",
+        "raw",
+        "https://forms.example.test/task",
+        "https://forms.example.test/task",
+        "",
+        datetime(2026, 9, 20, tzinfo=timezone.utc),
+        "processing_failed",
+        last_error="AI 오류 https://secret.example/token, 응답: 원문 전체 비밀 내용",
+    )
+    client = cleanup_client()
+    client.conversations_open.side_effect = [
+        ChecklistDeliveryError("ratelimited"),
+        {"channel": {"id": "DTEST"}},
+    ]
+    SlackChecklistClient(client).notify_notice_result(notice)
+    assert client.conversations_open.call_count == 2
+    assert client.chat_postMessage.call_count == 1
+    assert "secret.example" not in str(client.chat_postMessage.call_args.kwargs)
+    assert "원문 전체 비밀 내용" not in str(client.chat_postMessage.call_args.kwargs)
+    assert "AI 오류" in str(client.chat_postMessage.call_args.kwargs)
+
+
+def test_notice_result_malformed_first_dm_response_still_sends_second():
+    notice = Notice(
+        "TTEST",
+        "CNOTICE",
+        "100.1",
+        "raw",
+        "https://forms.example.test/task",
+        "https://forms.example.test/task",
+        "",
+        datetime(2026, 9, 20, tzinfo=timezone.utc),
+        "processing_failed",
+        last_error="분석 실패",
+    )
+    client = cleanup_client()
+    client.conversations_open.side_effect = [None, {"channel": {"id": "DTEST"}}]
+    SlackChecklistClient(client).notify_notice_result(notice)
+    assert client.conversations_open.call_count == 2
+    assert client.chat_postMessage.call_count == 1
 
 
 @pytest.mark.parametrize("deleted", [True, False])

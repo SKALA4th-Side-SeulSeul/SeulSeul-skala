@@ -26,7 +26,7 @@ from seulseul.notices.screen import (
     section_heading,
 )
 from seulseul.notices.service import NoticeRetryError, NoticeService
-from seulseul.slack.client import SlackWebApiClient
+from seulseul.slack.client import SlackChecklistClient, SlackWebApiClient
 
 
 def _positive_limit(raw: str) -> int:
@@ -223,6 +223,11 @@ def main(argv: list[str] | None = None) -> int:
                 channels,
                 analyzer=analyzer,
                 repository=repository,
+                on_result=SlackChecklistClient.from_token(
+                    slack_settings.bot_token
+                ).notify_notice_result
+                if args.action == "retry"
+                else lambda notice: None,
                 permalink_resolver=SlackWebApiClient.from_token(
                     slack_settings.bot_token
                 ).get_message_permalink

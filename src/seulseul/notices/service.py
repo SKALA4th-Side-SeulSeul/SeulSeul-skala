@@ -79,6 +79,7 @@ class NoticeService:
         analyzer: NoticeAnalyzerProtocol | None = None,
         repository: NoticeRepository | None = None,
         on_change: Callable[[], None] = lambda: None,
+        on_result: Callable[[Notice], None] = lambda notice: None,
         permalink_resolver: Callable[[str, str], str] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -92,6 +93,7 @@ class NoticeService:
         self._analyzer = analyzer
         self._repository = repository or InMemoryNoticeRepository(max_stored_notices)
         self._on_change = on_change
+        self._on_result = on_result
         self._permalink_resolver = permalink_resolver
         self._clock = clock
 
@@ -183,6 +185,7 @@ class NoticeService:
             SEOUL_TIMEZONE
         )
         results = []
+        attempted_urls: set[str] = set()
         for original_url, canonical_url in links:
             original = originals.get(canonical_url)
             if (
@@ -220,6 +223,8 @@ class NoticeService:
                     else None
                 ),
             )
+            if (self._analyzer is not None and manual_analysis is None) or collection_error:
+                attempted_urls.add(canonical_url)
             if (
                 analyzed.processing_status != "processed"
                 and original is not None
@@ -239,6 +244,9 @@ class NoticeService:
         changed = self._repository.apply_event(workspace_id, parsed, results)
         if changed and any(n.processing_status == "processed" or n.deleted_at for n in changed):
             self._on_change()
+        for notice in changed or []:
+            if notice.canonical_url in attempted_urls:
+                self._notify_result(notice)
         return changed or []
 
     def recent_notices(
@@ -302,6 +310,7 @@ class NoticeService:
             raise NoticeRetryError("분석 중 공지 상태가 변경되었습니다. 목록을 다시 확인해 주세요.")
         if analyzed.processing_status == "processed":
             self._on_change()
+        self._notify_result(analyzed)
         return analyzed
 
     def _retry_analysis(self, original: Notice) -> Notice:
@@ -383,6 +392,18 @@ class NoticeService:
                         result.channel_id,
                         result.message_ts,
                     )
+                self._notify_result(result)
+
+    def _notify_result(self, notice: Notice) -> None:
+        try:
+            self._on_result(notice)
+        except Exception as error:
+            logger.warning(
+                "공지 관리자 알림 실패: channel=%s ts=%s type=%s",
+                notice.channel_id,
+                notice.message_ts,
+                type(error).__name__,
+            )
 
     def _build_notice(
         self,

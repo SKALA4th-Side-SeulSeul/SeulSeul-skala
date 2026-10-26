@@ -219,35 +219,26 @@ def test_dashboard_adapts_all_lines_to_width_and_renders_both_charts():
         )
 
 
-def test_dashboard_panel_is_compact_and_reports_truncated_rows():
+def test_dashboard_panel_shows_actions_and_both_charts_within_ten_rows():
     failed = [notice(title=f"처리 대상 공지 {index}", retry_count=3) for index in range(1, 5)]
-    recent_titles = [f"최근 공지 {index}" for index in range(1, 8)]
-    recent = [notice(title=title, processing_status="processed") for title in recent_titles]
+    recent = [
+        notice(title=f"최근 공지 {index}", processing_status="processed") for index in range(7)
+    ]
 
     output = render_dashboard(failed, [], recent, now=NOW, width=80, panel=True)
     lines = output.splitlines()
 
-    assert not any(line.startswith(("━", "─")) for line in lines)
-    assert "  … 외 1건 · 전체 보기: ./view.sh dashboard" in output
-    assert "  … 외 2건 · 전체 보기: ./view.sh dashboard" in output
-    # 패널은 조치 공지를 한 줄 표로 압축하고 차트보다 먼저 보여 준다(작은 창에서 잘리지 않게).
-    action_rows = [line for line in lines if line.startswith(("  1  ", "  2  ", "  3  "))]
-    assert len(action_rows) == 3
-    assert all("✖ 수동 조치 필요" in row and "09/30(수) 23:59" in row for row in action_rows)
-    title_columns = {display_width(row[: row.index("처리 대상 공지")]) for row in action_rows}
-    assert len(title_columns) == 1
-    assert "  › ✖ 공지 다시 분석: 관리 콘솔 메뉴 1 또는 ./admin.sh retry 번호" in output
-    assert output.index("■ 처리가 필요한 공지") < output.index("■ 공지 상태 분포")
-    assert sum(any(f"최근 공지 {index}" in line for index in range(1, 6)) for line in lines) == 5
+    assert len(lines) <= 10
+    assert "■ 공지 상태" in output
+    assert "■ 필요한 조치" in output
+    assert "처리 대상 공지 1" in output
+    assert "… 외 2건" in output
+    assert "■ 분석 현황" in output
+    assert "■ 마감 분포" in output
+    assert "22일" in output and "28일" in output
+    assert "█" in output
+    assert "메뉴 4" in output and "메뉴 5" in output
     assert all(display_width(line) <= 80 for line in lines)
-    for index, line in enumerate(lines):
-        if line.startswith("■ "):
-            assert lines[index + 1].startswith("  ┆ ")
-    assert all(
-        lines[index + 1] != ""
-        for index, line in enumerate(lines)
-        if line.startswith("■ ") and index + 1 < len(lines)
-    )
 
 
 def test_dashboard_main_passes_width_and_panel_and_queries_100_recent_notices(monkeypatch, capsys):
@@ -303,7 +294,7 @@ def test_dashboard_main_passes_width_and_panel_and_queries_100_recent_notices(mo
 
     assert dashboard.main(["--width", "120", "--panel"]) == 0
 
-    assert "■ 한눈에 보기" in capsys.readouterr().out
+    assert "■ 공지 상태" in capsys.readouterr().out
     assert service_instances[0].calls == [(100, True)]
     assert render_arguments["width"] == 120
     assert render_arguments["panel"] is True

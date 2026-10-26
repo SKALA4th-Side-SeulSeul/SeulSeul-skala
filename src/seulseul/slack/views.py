@@ -1,6 +1,7 @@
 """Slack에 보여 줄 메시지 문구를 만든다."""
 
 import json
+import re
 from html import escape
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -37,6 +38,79 @@ def build_reminder_message(reminder):
                 "elements": [{"type": "plain_text", "text": f"{deadline:%m/%d %H:%M} 마감"}],
             },
         ],
+    }
+
+
+def build_notice_result_message(notice):
+    """공지 분석 결과를 짧은 관리자 DM으로 표시한다."""
+    success = notice.processing_status == "processed"
+    title = _short_title(notice.analysis.title) if success and notice.analysis else "분석 실패"
+    heading = (
+        "✅ 공지 분석 성공"
+        if success
+        else "❌ 공지 수집 실패"
+        if (notice.last_error or "").startswith("Slack 원문 링크")
+        else "❌ 공지 분석 실패"
+    )
+    deadline = (
+        notice.analysis.deadline_at.astimezone(ZoneInfo("Asia/Seoul")).strftime("%m/%d %H:%M")
+        if success and notice.analysis
+        else None
+    )
+    details = f"📝 *<{_link(notice.original_url)}|{escape(title, quote=False).replace('|', '｜')}>*"
+    blocks = [
+        {"type": "section", "text": {"type": "plain_text", "text": heading}},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": details},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "닫기"},
+                "action_id": "notice_result_close",
+                "value": "close",
+            },
+        },
+    ]
+    if deadline:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "plain_text", "text": f"{deadline} 마감"}]}
+        )
+    elif notice.next_retry_at:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "plain_text", "text": "자동 재처리 예정"}]}
+        )
+    else:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "plain_text", "text": "관리자 재처리 확인 필요"}],
+            }
+        )
+    if success and notice.analysis:
+        summary = " ".join(notice.analysis.summary.split())[:240]
+        blocks.append({"type": "section", "text": {"type": "plain_text", "text": summary}})
+    elif notice.last_error:
+        reason = re.sub(
+            r"https?://\S+|(?:nvapi-|xox[baprs]-)[A-Za-z0-9_-]+",
+            "[민감 정보 숨김]",
+            notice.last_error.split(", 응답:", 1)[0],
+        )
+        reason = " ".join(reason.split())[:240]
+        blocks.append(
+            {"type": "section", "text": {"type": "plain_text", "text": f"원인: {reason}"}}
+        )
+    if notice.source_permalink:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"<{_link(notice.source_permalink)}|원문 보기>"}
+                ],
+            }
+        )
+    return {
+        "text": f"{heading}: {title}" + (f" · {deadline} 마감" if deadline else ""),
+        "blocks": blocks,
     }
 
 

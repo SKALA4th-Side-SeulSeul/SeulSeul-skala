@@ -8,7 +8,7 @@ menu_labels=(
     '실패한 공지 AI로 다시 분석'
     '공지 직접 등록·수정·삭제'
     '반영 안 된 Slack 원본 보기'
-    '봇 로그 실시간 보기'
+    '전체 로그 검색·실시간 보기'
     '공지 대시보드 전체 보기'
     '가입 학생 전체에 안내 DM'
     '지금 DB 백업하기'
@@ -20,7 +20,7 @@ menu_descriptions=(
     'AI 분석에 실패해 학생 체크리스트에 반영되지 못한 공지를 다시 분석합니다. 번호는 공지 패널의 "처리가 필요한 공지" 번호입니다.'
     '봇이 없는 채널의 공지를 등록하거나, AI가 잘못 뽑은 제목·마감일을 고치거나, 공지를 삭제합니다. 원문은 이 메뉴를 연 뒤 붙여 넣고 .done으로 끝냅니다.'
     'Slack에서 받았지만 아직 체크리스트에 반영되지 않은 원본입니다. 잠시 뒤 사라지면 정상이고, 계속 남으면 원문을 확인하세요.'
-    '봇이 지금 무엇을 하는지 실시간으로 봅니다. 오류는 빨간색, 주의는 노란색입니다. Ctrl+C를 누르면 돌아옵니다.'
+    '모든 서비스의 현재·보관 로그와 수동 공지 기록을 기간·사용자·행위·문구로 찾거나 실시간으로 봅니다.'
     '공지 패널에서 잘린 목록과 차트를 한 화면에 모두 펼쳐 봅니다.'
     '점검·장애 안내처럼 모든 가입 학생에게 알릴 내용을 DM으로 보냅니다. 미리보기와 수신 인원을 확인하고 y를 입력해야 발송됩니다.'
     '운영 DB를 지금 백업합니다. 봇은 멈추지 않습니다. 배포·마이그레이션 전에 꼭 실행하세요.'
@@ -104,6 +104,35 @@ menu_retry() {
         return 0
     fi
     run_tool "$ops_root/scripts/retry.sh" "$index"
+    menu_pause
+}
+
+menu_logs() {
+    local choice='' since='' until='' user='' action='' keyword='' service='all'
+    ui_banner '전체 로그 찾기' '현재 컨테이너 · 재배포 전 보관 로그 · 수동 공지 기록'
+    ui_menu_item s '조건을 입력해 과거 로그 검색'
+    ui_menu_item f '모든 서비스 실시간 보기 (Ctrl+C로 종료)'
+    ui_menu_item Enter '돌아가기'
+    menu_read choice '선택: ' || return 0
+    case "$choice" in
+        f|F) run_tool "$ops_root/view.sh" logs all --follow; return 0 ;;
+        s|S) ;;
+        *) return 0 ;;
+    esac
+    menu_read since '시작 시각 (YYYY-MM-DD HH:MM, 없으면 Enter): ' || return 0
+    menu_read until '종료 시각 (YYYY-MM-DD HH:MM, 없으면 Enter): ' || return 0
+    menu_read user '사용자 이름 (없으면 Enter): ' || return 0
+    menu_read action '행위·결과 (예: 완료, 실패, 없으면 Enter): ' || return 0
+    menu_read keyword '포함할 문구 (없으면 Enter): ' || return 0
+    menu_read service '서비스 (all/bot/oauth/ngrok/postgres/manual, Enter=all): ' || return 0
+    local -a args=(logs search)
+    [[ -z "$since" ]] || args+=(--from "$since")
+    [[ -z "$until" ]] || args+=(--to "$until")
+    [[ -z "$user" ]] || args+=(--user "$user")
+    [[ -z "$action" ]] || args+=(--action "$action")
+    [[ -z "$keyword" ]] || args+=(--text "$keyword")
+    [[ -z "$service" ]] || args+=(--service "$service")
+    run_tool "$ops_root/view.sh" "${args[@]}"
     menu_pause
 }
 
@@ -195,7 +224,7 @@ menu_run() {
             run_tool "$ops_root/scripts/retry.sh" pending
             menu_pause
             ;;
-        4) run_tool "$ops_root/view.sh" logs bot --follow ;;
+        4) menu_logs ;;
         5)
             run_tool "$ops_root/view.sh" dashboard
             menu_pause

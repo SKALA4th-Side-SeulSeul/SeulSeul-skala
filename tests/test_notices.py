@@ -80,6 +80,93 @@ def record(service: NoticeService, event: dict[str, Any] | None = None) -> list[
     )
 
 
+def test_notice_result_callback_reports_saved_attempts_only() -> None:
+    delivered: list[str] = []
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        analyzer=FakeAnalyzer(),
+        on_result=lambda notice: delivered.append(notice.processing_status),
+    )
+    record(service)
+    record(service)
+    record(service, changed_message("9월 20일까지 제출 https://forms.example.test/task"))
+    assert delivered == ["processed"]
+
+
+def test_notice_result_callback_reports_failure_and_retry_success() -> None:
+    delivered: list[str] = []
+    analyzer = FakeAnalyzer(AiClientError("분석 실패", retryable=True))
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        analyzer=analyzer,
+        on_result=lambda notice: delivered.append(notice.processing_status),
+    )
+    failed = record(service)[0]
+    analyzer.error = None
+    recovered = service.retry_failed_notice(
+        WORKSPACE_ID, failed.original_url, ALLOWED_CHANNEL, MESSAGE_TS
+    )
+    assert recovered.processing_status == "processed"
+    assert delivered == ["processing_failed", "processed"]
+
+
+def test_notice_result_callback_failure_does_not_undo_storage() -> None:
+    def failing_callback(notice: Notice) -> None:
+        raise RuntimeError("DM unavailable")
+
+    service = NoticeService({ALLOWED_CHANNEL}, analyzer=FakeAnalyzer(), on_result=failing_callback)
+    assert record(service)[0].processing_status == "processed"
+    assert service.recent_notices(1)[0].processing_status == "processed"
+
+
+def test_notice_result_callback_reports_collection_failure() -> None:
+    delivered: list[str] = []
+    service = NoticeService(
+        {ALLOWED_CHANNEL}, on_result=lambda notice: delivered.append(notice.processing_status)
+    )
+    service.record_channel_message(
+        channel_message(),
+        workspace_id=WORKSPACE_ID,
+        collection_error="Slack 원문 링크 조회 실패",
+        bot_user_id="USEULSEUL",
+    )
+    assert delivered == ["processing_failed"]
+
+
+def test_manual_analysis_does_not_report_ai_success() -> None:
+    delivered: list[str] = []
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        analyzer=FakeAnalyzer(),
+        on_result=delivered.append,
+    )
+    analysis = FakeAnalyzer().analyze("", "", datetime.now(timezone.utc))
+    service.record_channel_message(
+        channel_message(),
+        workspace_id=WORKSPACE_ID,
+        source_permalink=PERMALINK,
+        manual_analysis=analysis,
+    )
+    assert delivered == []
+
+
+def test_notice_result_callback_reports_automatic_retry() -> None:
+    now = [datetime(2026, 9, 20, tzinfo=timezone.utc)]
+    delivered: list[str] = []
+    analyzer = FakeAnalyzer(AiClientError("일시 오류", retryable=True, auto_retryable=True))
+    service = NoticeService(
+        {ALLOWED_CHANNEL},
+        analyzer=analyzer,
+        clock=lambda: now[0],
+        on_result=lambda notice: delivered.append(notice.processing_status),
+    )
+    record(service)
+    analyzer.error = None
+    now[0] += timedelta(minutes=6)
+    service.run_retries(WORKSPACE_ID)
+    assert delivered == ["processing_failed", "processed"]
+
+
 def changed_message(text: str, revision: str = "1789344100.000001", **overrides: Any) -> dict:
     event = {
         "type": "message",

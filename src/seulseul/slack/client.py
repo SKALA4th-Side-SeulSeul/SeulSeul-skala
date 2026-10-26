@@ -10,9 +10,14 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError, SlackClientError
 
 from seulseul.checklists.model import ChecklistDeliveryError, DailyChecklistBoard
-from seulseul.slack.views import build_daily_checklist_message, build_reminder_message
+from seulseul.slack.views import (
+    build_daily_checklist_message,
+    build_notice_result_message,
+    build_reminder_message,
+)
 
 logger = logging.getLogger(__name__)
+ADMIN_NOTICE_USER_IDS = ("U0BHPU96LG0", "U0BGTJD4HF0")
 
 
 class SlackCommandResponder:
@@ -206,6 +211,49 @@ class SlackChecklistClient:
         if not isinstance(channel, str) or not channel.startswith("D"):
             raise ChecklistDeliveryError("invalid_dm_response")
         self._call("chat_delete", channel=channel, ts=ts)
+
+    def notify_notice_result(self, notice) -> None:
+        """각 관리자에게 일반 DM을 보내고 한 명의 발송 오류는 다른 발송과 격리한다."""
+        for recipient_number, user_id in enumerate(ADMIN_NOTICE_USER_IDS, start=1):
+            try:
+                opened = self._call("conversations_open", users=user_id)
+                channel = opened.get("channel")
+                channel_id = channel.get("id") if isinstance(channel, Mapping) else None
+                if not isinstance(channel_id, str) or not channel_id.startswith("D"):
+                    raise ChecklistDeliveryError("invalid_dm_response")
+                self._call(
+                    "chat_postMessage",
+                    posting=True,
+                    channel=channel_id,
+                    **build_notice_result_message(notice),
+                    unfurl_links=False,
+                    unfurl_media=False,
+                )
+            except Exception as error:
+                code = (
+                    error.code
+                    if isinstance(error, ChecklistDeliveryError)
+                    else type(error).__name__
+                )
+                logger.warning(
+                    "관리자 공지 DM 발송 실패: recipient=%d code=%s",
+                    recipient_number,
+                    code,
+                )
+
+    def close_notice_result(self, user_id: str, channel_id: str, ts: str) -> None:
+        if (
+            user_id not in ADMIN_NOTICE_USER_IDS
+            or not isinstance(ts, str)
+            or not re.fullmatch(r"\d+\.\d+", ts)
+        ):
+            raise ChecklistDeliveryError("invalid_notice_close")
+        opened = self._call("conversations_open", users=user_id)
+        channel = opened.get("channel")
+        expected = channel.get("id") if isinstance(channel, Mapping) else None
+        if not isinstance(expected, str) or not expected.startswith("D") or channel_id != expected:
+            raise ChecklistDeliveryError("invalid_notice_close")
+        self._call("chat_delete", channel=channel_id, ts=ts)
 
     def send_enrollment_guidance(self, user_id: str, guidance: str) -> None:
         """성명 불일치 안내만 일반 DM으로 보낸다. 기존 메시지는 정리하지 않는다."""

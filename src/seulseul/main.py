@@ -31,10 +31,15 @@ from seulseul.database import create_database_engine, create_session_factory
 from seulseul.jobs.scheduler import ChecklistScheduler
 from seulseul.jobs.tasks import refresh_checklists, retry_notices
 from seulseul.logging_setup import configure_logging
+from seulseul.notices.model import Notice
 from seulseul.notices.repository import NoticeRepository, SqlAlchemyNoticeRepository
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import SlackChecklistClient, SlackWebApiClient
-from seulseul.slack.handlers import register_checklist_handlers, register_handlers
+from seulseul.slack.handlers import (
+    create_notice_result_close_handler,
+    register_checklist_handlers,
+    register_handlers,
+)
 from seulseul.users.repository import SqlAlchemyStudentRepository
 from seulseul.users.service import StudentService
 
@@ -47,11 +52,15 @@ def create_notice_service(
     repository: NoticeRepository,
     on_change: Callable[[], None] = lambda: None,
     permalink_resolver: Callable[[str, str], str] | None = None,
+    on_result: Callable[[Notice], None] = lambda notice: None,
 ) -> NoticeService:
     if ai_settings is None:
         logger.info("AI_PROVIDER가 비어 있어 원문 링크만 수집합니다.")
         return NoticeService(
-            allowed_channel_ids=notice_channel_ids, repository=repository, on_change=on_change
+            allowed_channel_ids=notice_channel_ids,
+            repository=repository,
+            on_change=on_change,
+            on_result=on_result,
         )
 
     client = OpenAICompatibleChatClient(
@@ -74,6 +83,7 @@ def create_notice_service(
         analyzer=NoticeAnalyzer(client),
         repository=repository,
         on_change=on_change,
+        on_result=on_result,
         permalink_resolver=permalink_resolver,
     )
 
@@ -107,14 +117,15 @@ def main() -> None:
     session_factory = create_session_factory(engine)
     notice_repository = SqlAlchemyNoticeRepository(session_factory)
     student_repository = SqlAlchemyStudentRepository(session_factory)
+    messenger = SlackChecklistClient.from_token(slack_settings.bot_token)
     notice_service = create_notice_service(
         ai_settings,
         slack_settings.notice_channels,
         notice_repository,
         (wakeup := Event()).set,
         SlackWebApiClient.from_token(slack_settings.bot_token).get_message_permalink,
+        messenger.notify_notice_result,
     )
-    messenger = SlackChecklistClient.from_token(slack_settings.bot_token)
     checklist_service = DailyChecklistService(
         SqlAlchemyChecklistRepository(session_factory),
         messenger,
@@ -131,6 +142,7 @@ def main() -> None:
     )
     app = create_app(slack_settings, notice_service, student_service)
     register_checklist_handlers(app, checklist_service, student_service)
+    app.action("notice_result_close")(create_notice_result_close_handler(messenger))
     scheduler = ChecklistScheduler(
         lambda: refresh_checklists(checklist_service, scheduler.stopped.is_set),
         wakeup,

@@ -244,7 +244,14 @@ def _create_service(
         resources.callback(client.close)
         analyzer = NoticeAnalyzer(client)
     allowed_channels = (*settings.notice_channels, *settings.manual_notice_channels)
-    return NoticeService(allowed_channels, analyzer=analyzer, repository=repository)
+    return NoticeService(
+        allowed_channels,
+        analyzer=analyzer,
+        repository=repository,
+        on_result=SlackChecklistClient.from_token(settings.bot_token).notify_notice_result
+        if analyzer is not None
+        else lambda notice: None,
+    )
 
 
 def run_command(args: argparse.Namespace) -> int:

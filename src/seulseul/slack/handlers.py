@@ -18,8 +18,10 @@ from seulseul.checklists.model import ChecklistActionError, ChecklistDeliveryErr
 from seulseul.checklists.service import DailyChecklistService
 from seulseul.notices.service import NoticeService
 from seulseul.slack.client import (
+    ADMIN_NOTICE_USER_IDS,
     MessagePermalinkError,
     MessagePermalinkProvider,
+    SlackChecklistClient,
     SlackCommandResponder,
     SlackWebApiClient,
     UserProfileError,
@@ -319,6 +321,25 @@ def register_checklist_handlers(
     app.action(re.compile(r"^checklist_(complete|undo|pending|completed|previous|next|refresh)$"))(
         create_checklist_action_handler(service, actor_name_provider)
     )
+
+
+def create_notice_result_close_handler(messenger: SlackChecklistClient):
+    def handle(ack, respond, body, logger):
+        ack()
+        try:
+            user_id = body["user"]["id"]
+            if user_id not in ADMIN_NOTICE_USER_IDS:
+                raise ChecklistDeliveryError("invalid_notice_close")
+            messenger.close_notice_result(
+                user_id, body["container"]["channel_id"], body["container"]["message_ts"]
+            )
+        except Exception as error:
+            logger.warning("관리자 공지 알림 닫기 실패: type=%s", type(error).__name__)
+            SlackCommandResponder(respond).send(
+                "알림을 닫지 못했습니다. 본인 DM에서 다시 시도해 주세요."
+            )
+
+    return handle
 
 
 def create_reminder_close_handler(service):

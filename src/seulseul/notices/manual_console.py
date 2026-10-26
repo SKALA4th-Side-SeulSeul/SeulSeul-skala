@@ -523,7 +523,7 @@ def _required(read: Callable[[str], str], label: str) -> str:
     return _field(read, label, "")
 
 
-def _build_ai_factory(repository, resources: ExitStack, allowed_channels):
+def _build_ai_factory(repository, resources: ExitStack, allowed_channels, bot_token):
     def factory() -> NoticeService | None:
         ai_settings = load_ai_settings()
         if ai_settings is None:
@@ -541,6 +541,7 @@ def _build_ai_factory(repository, resources: ExitStack, allowed_channels):
             allowed_channels,
             analyzer=NoticeAnalyzer(client),
             repository=repository,
+            on_result=SlackChecklistClient.from_token(bot_token).notify_notice_result,
         )
 
     return factory
@@ -631,7 +632,9 @@ def main(argv: list[str] | None = None) -> int:
             resources.callback(engine.dispose)
             repository = SqlAlchemyNoticeRepository(create_session_factory(engine))
             service = NoticeService(allowed_channels, repository=repository)
-            ai_factory = _build_ai_factory(repository, resources, allowed_channels)
+            ai_factory = _build_ai_factory(
+                repository, resources, allowed_channels, settings.bot_token
+            )
             reader = LineReader()
             return run_interactive(
                 service,
